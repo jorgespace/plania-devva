@@ -1,11 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { StopBody } from "@/components/compania/parts";
-import { PlumbingMissing, PlumbingSection } from "@/components/compania/plumbing";
-import { LimitForm, OWNER_CODE_WORDS, OwnerCodeRow, limitTitle, type LimitTarget } from "@/components/compania/sheets";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import type { MachinePlumbing } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { PlumbingMissing } from "@/components/compania/plumbing";
+import { Head } from "@/components/corriente/header";
+import { Plomeria } from "@/components/corriente/plomeria";
+import { hrefOf, linkTo } from "@/lib/corriente";
+import { pending } from "@/lib/v2";
 import { BoxIcon, CableIcon, CogIcon, DatabaseIcon, GitBranchIcon, GlobeIcon, HardDriveIcon, LayersIcon, ServerIcon } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ComponentType, type KeyboardEvent } from "react";
 import { Link, useSearchParams } from "react-router";
@@ -14,13 +12,15 @@ import { CopyCommand } from "@/components/copy-command";
 import { Skeleton } from "@/components/ui/skeleton";
 import { hasProjectMark, ProjectMark } from "@/components/plania-mark";
 import { Kicker, accentInk, projectAccent } from "@/components/plan/visuals";
-import { ApiError, api } from "@/lib/api";
-import { SOURCE_WORD, STATE_WORD, ageSource, formatKb, groupItems, isPrimary, nameOf, sizeOf, whyLine, type Group, type TicketNode } from "@/lib/machine";
+import { api } from "@/lib/api";
+import { words } from "@/lib/i18n";
+import { MACHINE_PAGE } from "@/lib/machine-words";
+import { ageSource, formatKb, groupItems, isPrimary, nameOf, sizeOf, sourceWord, stateWord, whyLine, type Group, type TicketNode } from "@/lib/machine";
 import { ago, span } from "@/lib/time";
 import type { FootprintItem, FootprintKind, FootprintState, MachineBackup } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-// What runs and is stored on this Mac for agent work, from the machine job (observed) and from
+// What runs and is stored on this machine for agent work, from the machine job (observed) and from
 // register_footprint (declared). Read-only: it shows the teardown command, it never runs one.
 
 const ICON: Record<FootprintKind, ComponentType<{ className?: string }>> = {
@@ -34,22 +34,11 @@ const ICON: Record<FootprintKind, ComponentType<{ className?: string }>> = {
   service: CogIcon,
   cache: LayersIcon,
 };
-const KIND_WORD: Record<FootprintKind, string> = {
-  worktree: "worktree",
-  server: "servidor",
-  db_server: "servidor de bases",
-  database: "base de datos",
-  container: "contenedor",
-  browser: "navegador",
-  tunnel: "túnel",
-  service: "servicio",
-  cache: "caché",
-};
 
 // Literal class names so Tailwind generates every one.
 const STATE_CLASS: Record<FootprintState, string> = {
   live: "bg-status-done/12 text-ink-done",
-  orphan: "bg-status-jorge/14 text-ink-jorge",
+  orphan: "bg-status-owner/14 text-ink-owner",
   stale: "bg-status-now/16 text-ink-now",
   ghost: "bg-status-pending/25 text-muted-foreground",
   gone: "bg-muted text-muted-foreground",
@@ -71,7 +60,7 @@ function useNow(everyMs = 30_000) {
 function StateBadge({ state }: { state: FootprintState }) {
   return (
     <span className={cn("inline-flex h-5 shrink-0 items-center rounded-full px-2 text-[11px] font-semibold whitespace-nowrap", STATE_CLASS[state])}>
-      {STATE_WORD[state]}
+      {stateWord(state)}
     </span>
   );
 }
@@ -85,10 +74,12 @@ function Tag({ children, tone }: { children: React.ReactNode; tone?: "warn" }) {
 }
 
 function CopyTeardown({ command, declared }: { command: string; declared: boolean }) {
-  return <CopyCommand command={command} caption={declared ? "Comando declarado por quien lo creó" : "Comando sugerido; Plania no lo ejecuta"} />;
+  const w = words(MACHINE_PAGE);
+  return <CopyCommand command={command} caption={declared ? w.declared : w.suggested} />;
 }
 
 function Row({ it, nowMs, showTicket }: { it: FootprintItem; nowMs: number; showTicket: boolean }) {
+  const w = words(MACHINE_PAGE);
   const Icon = ICON[it.kind];
   const { name, detail } = nameOf(it);
   const size = sizeOf(it);
@@ -100,8 +91,8 @@ function Row({ it, nowMs, showTicket }: { it: FootprintItem; nowMs: number; show
   const d = it.details;
   const session = it.session_id ?? holder?.session_id ?? null;
   const meta: React.ReactNode[] = [];
-  if (gone && it.last_seen_at) meta.push(<span key="seen">visto por última vez {ago(it.last_seen_at, nowMs)}</span>);
-  else if (age) meta.push(<span key="age">{age.label === "activo" ? `activo ${span(age.iso, nowMs)}` : `${age.label} ${ago(age.iso, nowMs)}`}</span>);
+  if (gone && it.last_seen_at) meta.push(<span key="seen">{w.lastSeen(ago(it.last_seen_at, nowMs))}</span>);
+  else if (age) meta.push(<span key="age">{age.active ? w.active(span(age.iso, nowMs)) : `${age.label} ${ago(age.iso, nowMs)}`}</span>);
   if (size) meta.push(<span key="size" className="font-medium text-foreground/80">{size}</span>);
   if (showTicket && it.task_key && it.project) {
     meta.push(
@@ -112,22 +103,22 @@ function Row({ it, nowMs, showTicket }: { it: FootprintItem; nowMs: number; show
     );
   }
   if (session) meta.push(<span key="session" className="font-mono">{holder?.agent ? `${holder.agent} · ` : ""}{session.length > 14 ? `${session.slice(0, 8)}…` : session}</span>);
-  meta.push(<span key="source">{SOURCE_WORD[it.source]}</span>);
+  meta.push(<span key="source">{sourceWord(it.source)}</span>);
 
   return (
     <li className={cn("grid grid-cols-[auto_1fr_auto] gap-x-3 gap-y-1.5 px-4 py-3", gone && "opacity-60")}>
-      <span className="mt-0.5 inline-flex size-8 items-center justify-center rounded-lg bg-surface-sunken text-muted-foreground" title={KIND_WORD[it.kind]}>
+      <span className="mt-0.5 inline-flex size-8 items-center justify-center rounded-lg bg-surface-sunken text-muted-foreground" title={w.kinds[it.kind]}>
         <Icon className="size-4" />
-        <span className="sr-only">{KIND_WORD[it.kind]}</span>
+        <span className="sr-only">{w.kinds[it.kind]}</span>
       </span>
       <div className="grid min-w-0 gap-1.5">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className={cn("min-w-0 font-medium break-all", it.kind === "server" && "font-mono")}>{name}</span>
           {detail && <span className="min-w-0 text-sm break-all text-muted-foreground">{detail}</span>}
-          {isPrimary(it) && <Tag>principal</Tag>}
-          {d.on_secondary_server === true && <Tag tone="warn">servidor secundario</Tag>}
-          {it.kind === "worktree" && d.dirty === true && <Tag tone="warn">sin guardar</Tag>}
-          {it.kind === "worktree" && d.merged === true && <Tag>integrada</Tag>}
+          {isPrimary(it) && <Tag>{w.primary}</Tag>}
+          {d.on_secondary_server === true && <Tag tone="warn">{w.secondaryServer}</Tag>}
+          {it.kind === "worktree" && d.dirty === true && <Tag tone="warn">{w.unsaved}</Tag>}
+          {it.kind === "worktree" && d.merged === true && <Tag>{w.merged}</Tag>}
         </div>
         <p className="text-xs text-muted-foreground">
           {meta.map((m, i) => <Fragment key={i}>{i > 0 && " · "}{m}</Fragment>)}
@@ -136,7 +127,7 @@ function Row({ it, nowMs, showTicket }: { it: FootprintItem; nowMs: number; show
         {purpose && (
           <p className="text-sm">
             {purpose}
-            {!it.purpose && it.lease && <span className="text-xs text-muted-foreground"> · puerto reservado por {it.lease.holder.agent}</span>}
+            {!it.purpose && it.lease && <span className="text-xs text-muted-foreground">{w.portBy(it.lease.holder.agent)}</span>}
           </p>
         )}
       </div>
@@ -166,6 +157,7 @@ function TicketRows({ t, nowMs, depth }: { t: TicketNode; nowMs: number; depth: 
 }
 
 function GroupCard({ g, nowMs }: { g: Group; nowMs: number }) {
+  const w = words(MACHINE_PAGE);
   const [a] = projectAccent(g.title);
   const flat = g.kind !== "project";
   return (
@@ -181,7 +173,7 @@ function GroupCard({ g, nowMs }: { g: Group; nowMs: number }) {
           <h2 className="min-w-0 truncate font-display text-lg font-bold tracking-tight" style={g.kind === "project" ? { color: accentInk(a) } : undefined}>{g.title}</h2>
           {g.kind === "repo" && <Kicker className="text-muted-foreground">repo</Kicker>}
         </div>
-        <span className="shrink-0 text-xs text-muted-foreground">{g.count === 1 ? "1 elemento" : `${g.count} elementos`}</span>
+        <span className="shrink-0 text-xs text-muted-foreground">{w.elements(g.count)}</span>
       </header>
       <ul className="divide-y">
         {/* Servers en uso lead the card; each still names its ticket. */}
@@ -201,15 +193,16 @@ function GroupCard({ g, nowMs }: { g: Group; nowMs: number }) {
 }
 
 function Totals({ machine }: { machine: NonNullable<ReturnType<typeof useMachine>["data"]> }) {
+  const w = words(MACHINE_PAGE);
   const t = machine.totals;
   const pill = "inline-flex items-center gap-2 rounded-full px-3 py-2";
   return (
     <ul className="flex flex-wrap gap-2.5 text-xs font-semibold">
-      <li className={cn(pill, "bg-status-done/12 text-ink-done")}>{t.servers === 1 ? "1 servidor" : `${t.servers} servidores`}</li>
-      <li className={cn(pill, "bg-status-ready/12 text-ink-ready")}>{t.databases === 1 ? "1 base de datos" : `${t.databases} bases de datos`}</li>
-      <li className={cn(pill, "bg-muted text-foreground/80")}>{formatKb(t.worktree_kb)} en worktrees</li>
-      {t.orphan > 0 && <li className={cn(pill, "bg-status-jorge/14 text-ink-jorge")}>{t.orphan} sin dueño</li>}
-      {t.stale > 0 && <li className={cn(pill, "bg-status-now/16 text-ink-now")}>{t.stale === 1 ? "1 obsoleto" : `${t.stale} obsoletos`}</li>}
+      <li className={cn(pill, "bg-status-done/12 text-ink-done")}>{w.servers(t.servers)}</li>
+      <li className={cn(pill, "bg-status-ready/12 text-ink-ready")}>{w.databases(t.databases)}</li>
+      <li className={cn(pill, "bg-muted text-foreground/80")}>{w.inWorktrees(formatKb(t.worktree_kb))}</li>
+      {t.orphan > 0 && <li className={cn(pill, "bg-status-owner/14 text-ink-owner")}>{w.orphan(t.orphan)}</li>}
+      {t.stale > 0 && <li className={cn(pill, "bg-status-now/16 text-ink-now")}>{w.stale(t.stale)}</li>}
     </ul>
   );
 }
@@ -224,24 +217,26 @@ function formatBytes(n: number): string {
 
 // The nightly pg_dump: one quiet line, red when the last attempt failed or the last copy is over 48 h old.
 function BackupLine({ backup, nowMs }: { backup: MachineBackup | undefined; nowMs: number }) {
+  const w = words(MACHINE_PAGE);
   if (!backup) return null;
   const stale = !backup.at || nowMs - new Date(backup.at).getTime() > BACKUP_STALE_MS;
   const bad = Boolean(backup.error) || (stale && Boolean(backup.attempted_at));
-  const copy = backup.at ? `Última copia: ${ago(backup.at, nowMs)}${backup.bytes ? `, ${formatBytes(backup.bytes)}` : ""}` : "Sin copias todavía";
+  const copy = backup.at ? w.lastCopy(ago(backup.at, nowMs), backup.bytes ? formatBytes(backup.bytes) : null) : w.noCopies;
   return (
     <p className={cn("text-[13px] wrap-anywhere", bad ? "font-medium text-destructive" : "text-muted-foreground")} title={backup.path ?? undefined}>
       {copy}
-      {backup.error && ` · falló ${backup.attempted_at ? ago(backup.attempted_at, nowMs) : ""}: ${backup.error}`}
+      {backup.error && w.copyFailed(backup.attempted_at ? ago(backup.attempted_at, nowMs) : "", backup.error)}
     </p>
   );
 }
 
-// What the audit finds about the Mac that no project audit holds: a short list under the header.
+// What the audit finds about the machine that no project audit holds: a short list under the header.
 function Findings({ findings }: { findings: NonNullable<ReturnType<typeof useMachine>["data"]>["findings"] }) {
+  const w = words(MACHINE_PAGE);
   if (!findings.length) return null;
   return (
-    <section aria-label="Hallazgos" className="grid gap-2 rounded-xl border border-status-now/40 bg-status-now/8 px-4 py-3">
-      <Kicker className="text-ink-now">{findings.length === 1 ? "1 hallazgo" : `${findings.length} hallazgos`}</Kicker>
+    <section aria-label={w.findingsLabel} className="grid gap-2 rounded-xl border border-status-now/40 bg-status-now/8 px-4 py-3">
+      <Kicker className="text-ink-now">{w.findings(findings.length)}</Kicker>
       <ul className="grid gap-2">
         {findings.map((f, i) => (
           <li key={i} className="grid min-w-0 gap-0.5 text-sm">
@@ -256,15 +251,17 @@ function Findings({ findings }: { findings: NonNullable<ReturnType<typeof useMac
 }
 
 type TabId = "servidores" | "bases" | "worktrees" | "otros";
-const TABS: { id: TabId; label: string; icon: ComponentType<{ className?: string }>; kinds: FootprintKind[]; empty: string }[] = [
-  { id: "servidores", label: "Servidores activos", icon: ServerIcon, kinds: ["server"], empty: "Ningún servidor corriendo." },
-  { id: "bases", label: "Bases de datos", icon: DatabaseIcon, kinds: ["database", "db_server"], empty: "Ninguna base de datos." },
-  { id: "worktrees", label: "Worktrees", icon: GitBranchIcon, kinds: ["worktree"], empty: "Ningún worktree." },
+// PLA-I2-10: each tab's label and empty line are in lib/machine-words.ts.
+const TABS: { id: TabId; icon: ComponentType<{ className?: string }>; kinds: FootprintKind[] }[] = [
+  { id: "servidores", icon: ServerIcon, kinds: ["server"] },
+  { id: "bases", icon: DatabaseIcon, kinds: ["database", "db_server"] },
+  { id: "worktrees", icon: GitBranchIcon, kinds: ["worktree"] },
   // Services, browsers, containers, tunnels and caches: few, but they should not vanish.
-  { id: "otros", label: "Otros", icon: CogIcon, kinds: ["service", "browser", "container", "tunnel", "cache"], empty: "Nada más." },
+  { id: "otros", icon: CogIcon, kinds: ["service", "browser", "container", "tunnel", "cache"] },
 ];
 
 function Tabs({ active, counts, onChange }: { active: TabId; counts: Record<TabId, number>; onChange: (id: TabId) => void }) {
+  const w = words(MACHINE_PAGE);
   const refs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   // Arrow keys move between tabs (roving tabindex), as a tablist should.
   function onKeyDown(e: KeyboardEvent) {
@@ -277,8 +274,8 @@ function Tabs({ active, counts, onChange }: { active: TabId; counts: Record<TabI
     refs.current[to.id]?.focus();
   }
   return (
-    <div role="tablist" aria-label="Qué ver" onKeyDown={onKeyDown} className="grid w-full grid-cols-2 gap-1 rounded-[22px] border bg-card p-1 sm:flex sm:w-fit sm:flex-wrap sm:rounded-full">
-      {TABS.map(({ id, label, icon: Icon }) => (
+    <div role="tablist" aria-label={w.tablist} onKeyDown={onKeyDown} className="grid w-full grid-cols-2 gap-1 rounded-[22px] border bg-card p-1 sm:flex sm:w-fit sm:flex-wrap sm:rounded-full">
+      {TABS.map(({ id, icon: Icon }) => (
         <button
           key={id}
           ref={(el) => { refs.current[id] = el; }}
@@ -295,7 +292,7 @@ function Tabs({ active, counts, onChange }: { active: TabId; counts: Record<TabI
           )}
         >
           <Icon className="size-3.5" aria-hidden />
-          {label}
+          {w.tabs[id].label}
           <span className={cn("rounded-full px-1.5 font-mono text-[11px]", active === id ? "bg-background/15" : "bg-foreground/[0.08]")}>{counts[id]}</span>
         </button>
       ))}
@@ -308,118 +305,8 @@ function useMachine() {
   return useQuery({ queryKey: ["machine"], queryFn: api.machinePlumbing, staleTime: 15_000, refetchInterval: 20_000 });
 }
 
-type StopScope = { kind: "company" } | { kind: "project"; slug: string; title: string };
-
-// PLA-I33-3: week tokens, plan guard, switches, En marcha and the run log, with their Jorge-only writes
-// (the PLA-I30 routes under /api/company, cookie session only).
-function Plumbing({ plumbing, nowMs }: { plumbing: MachinePlumbing; nowMs: number }) {
-  const client = useQueryClient();
-  const [stop, setStop] = useState<StopScope | null>(null);
-  const [limit, setLimit] = useState<LimitTarget | null>(null);
-  const canEdit = plumbing.viewer?.can_edit_limits ?? true;
-  // PLA-I36-11: the owner's code.
-  const owner = useQuery({ queryKey: ["owner-code"], queryFn: api.ownerCode, staleTime: 60_000 });
-  const enrol = useMutation({
-    mutationFn: api.enrolOwnerCode,
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["owner-code"] }),
-  });
-  const refresh = () => {
-    void client.invalidateQueries({ queryKey: ["machine"] });
-    void client.invalidateQueries({ queryKey: ["company"] });
-  };
-  const titles = new Map(plumbing.usage.projects.map((p) => [p.slug, p.title]));
-  const companySwitch = useMutation({
-    mutationFn: (paused: boolean) => api.setCompanyPaused(paused),
-    onSuccess: (r) => {
-      toast(r.paused ? `Compañía detenida${r.stopped ? ` · ${r.stopped} corridas cerrándose` : ""}` : "Compañía en marcha");
-      setStop(null);
-      refresh();
-    },
-    onError: () => toast.error("No se pudo cambiar el interruptor"),
-  });
-  const projectSwitch = useMutation({
-    mutationFn: ({ slug, paused }: { slug: string; paused: boolean }) => api.setProjectPaused(slug, paused),
-    onSuccess: (r) => {
-      toast(r.paused ? `${titles.get(r.project) ?? r.project} en pausa` : `${titles.get(r.project) ?? r.project} reanudado`);
-      setStop(null);
-      refresh();
-    },
-    onError: () => toast.error("No se pudo cambiar el interruptor del proyecto"),
-  });
-  const saveLimit = useMutation({
-    mutationFn: async ({ value }: { value: number }) => api.setRunnerSettings({ plan_guard_pct: value }),
-    onSuccess: () => {
-      toast("Guardado");
-      setLimit(null);
-      refresh();
-    },
-    onError: () => toast.error("No se pudo guardar"),
-  });
-  const saveOverride = useMutation({
-    mutationFn: async (on: boolean) => api.setRunnerSettings({ guard_override: on }),
-    onSuccess: (_r, on) => {
-      toast(on ? "Límite del plan ignorado" : "Guardia del plan activa");
-      refresh();
-    },
-    onError: () => toast.error("No se pudo guardar"),
-  });
-  return (
-    <>
-      <OwnerCodeRow
-        enrolled={owner.data?.enrolled ?? null}
-        busy={enrol.isPending}
-        secret={enrol.data ?? null}
-        error={enrol.error instanceof ApiError ? (enrol.error.code === "INVALID_PASSWORD" ? "Contraseña incorrecta." : (OWNER_CODE_WORDS[enrol.error.code] ?? `No se pudo (${enrol.error.code}).`)) : null}
-        onEnrol={(input) => enrol.mutate(input)}
-      />
-      <PlumbingSection
-        plumbing={plumbing}
-        now={nowMs}
-        canEdit={canEdit}
-        onMoveGuard={() => setLimit({ kind: "guard", current: plumbing.plan.guard_pct })}
-        onToggleOverride={(on) => saveOverride.mutate(on)}
-        onStopCompany={() => setStop({ kind: "company" })}
-        onResumeCompany={() => companySwitch.mutate(false)}
-        onPauseProject={(p) => setStop({ kind: "project", slug: p.slug, title: p.title })}
-        onResumeProject={(p) => projectSwitch.mutate({ slug: p.slug, paused: false })}
-      />
-      {/* 5i: stop the company or pause a project */}
-      <Sheet open={stop !== null} onOpenChange={(open) => !open && setStop(null)}>
-        <SheetContent side="bottom" className="mx-auto max-h-[85svh] w-full max-w-xl overflow-y-auto rounded-t-[22px] bg-background">
-          <SheetHeader className="pr-10">
-            <SheetTitle className="font-display text-2xl font-extrabold tracking-tight">
-              {stop?.kind === "project" ? `¿Pausar ${stop.title}?` : "¿Detener la compañía?"}
-            </SheetTitle>
-            <SheetDescription>Se puede deshacer: reanudas cuando quieras.</SheetDescription>
-          </SheetHeader>
-          <div className="px-4 pb-8">
-            {stop && (
-              <StopBody
-                scope={stop}
-                runs={plumbing.runs.live}
-                projectTitle={(slug) => titles.get(slug) ?? slug}
-                busy={companySwitch.isPending || projectSwitch.isPending}
-                onCancel={() => setStop(null)}
-                onConfirm={() => (stop.kind === "company" ? companySwitch.mutate(true) : projectSwitch.mutate({ slug: stop.slug, paused: true }))}
-              />
-            )}
-          </div>
-        </SheetContent>
-      </Sheet>
-      <Dialog open={limit !== null} onOpenChange={(open) => !open && setLimit(null)}>
-        <DialogContent className="bg-background sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="font-display text-xl font-extrabold tracking-tight">{limit ? limitTitle(limit) : ""}</DialogTitle>
-            <DialogDescription>Solo tú mueves la guardia. Los agentes no pueden.</DialogDescription>
-          </DialogHeader>
-          {limit && <LimitForm target={limit} busy={saveLimit.isPending} onCancel={() => setLimit(null)} onSave={(value) => saveLimit.mutate({ value })} />}
-        </DialogContent>
-      </Dialog>
-    </>
-  );
-}
-
 export function MachinePage() {
+  const w = words(MACHINE_PAGE);
   const machine = useMachine();
   // En marcha's clocks tick by the second only while something runs.
   const nowMs = useNow(machine.data?.plumbing?.runs.live.length ? 1000 : 30_000);
@@ -436,19 +323,53 @@ export function MachinePage() {
   const gone = inTab.filter((i) => i.state === "gone").length;
   const groups = useMemo(() => groupItems(showGone ? inTab : inTab.filter((i) => i.state !== "gone")), [inTab, showGone]);
 
+  // PLA-I62-8: Plomería in La corriente's look (board D3); what runs on the machine stays below, behind «Ver qué corre».
+  const company = useQuery({ queryKey: ["company"], queryFn: api.company, staleTime: 10_000, refetchInterval: 20_000 });
+  const [inventory, setInventory] = useState(() => params.has("tab"));
+  const t = machine.data?.totals;
+  const macLine = t ? w.macLine(t.servers, t.databases, formatKb(t.worktree_kb), machine.data?.backup?.at ? ago(machine.data.backup.at, nowMs) : null) : "…";
   return (
     <div className="grid gap-8">
+      <div className={`cor ${inventory ? "grow" : ""}`} data-corriente="plomeria">
+        <span className="cor-aura" aria-hidden />
+        <Head
+          view="plomeria"
+          waiting={(company.data?.decisions ?? []).filter(pending).length}
+          asistenteUnread={company.data?.asistente.unread ?? 0}
+          now={nowMs}
+          timeZone={company.data?.week.timezone}
+          pedirTo={hrefOf({ view: "pedir" })}
+          tocaTo={linkTo({ view: "tetoca" })}
+        />
+        <div className="cor-main">
+          {machine.data?.plumbing ? (
+            <Plomeria plumbing={machine.data.plumbing} inventory={inventory} onInventory={() => setInventory((x) => !x)} macLine={macLine} />
+          ) : machine.data ? (
+            <div style={{ padding: "22px 32px" }}>
+              <PlumbingMissing />
+            </div>
+          ) : machine.isError ? (
+            <p className="cor-text" style={{ padding: "22px 32px" }}>{w.plumbingFailed}</p>
+          ) : (
+            <div className="cor-skel" style={{ margin: "22px 32px", flex: 1 }} aria-busy="true" />
+          )}
+        </div>
+      </div>
+      {inventory && (
+      <div className="mx-auto grid w-full max-w-[1480px] gap-8 gutter pb-10">
       <header className="flex animate-rise flex-wrap items-end justify-between gap-6">
         <div className="grid gap-2.5">
-          <Kicker className="text-muted-foreground">Máquina</Kicker>
-          <h1 className="font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-5xl">¿Qué hay corriendo?</h1>
+          <Kicker className="text-muted-foreground">{w.kicker}</Kicker>
+          <h1 className="font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-5xl">{w.title}</h1>
           {machine.data && <p className="text-[15px] break-all text-muted-foreground">{machine.data.machine}</p>}
           {machine.data && <BackupLine backup={machine.data.backup} nowMs={nowMs} />}
+          {/* PLA-I2-12: the machine check, what this machine lacks to run Plania. */}
+          <Link to="/machine/falta" className="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground">
+            {w.lacks}
+          </Link>
         </div>
         {machine.data && <Totals machine={machine.data} />}
       </header>
-
-      {machine.data && (machine.data.plumbing ? <Plumbing plumbing={machine.data.plumbing} nowMs={nowMs} /> : <PlumbingMissing />)}
 
       {machine.data && <Findings findings={machine.data.findings ?? []} />}
 
@@ -457,9 +378,9 @@ export function MachinePage() {
           {[0, 1, 2].map((i) => <Skeleton key={i} className="h-40 rounded-xl" />)}
         </div>
       )}
-      {machine.isError && <p className="text-sm text-destructive">No se pudo cargar la máquina.</p>}
+      {machine.isError && <p className="text-sm text-destructive">{w.loadFailed}</p>}
       {machine.data && items.length === 0 && (
-        <p className="text-sm text-muted-foreground">Todavía no se ha visto nada. El servicio local revisa la Mac cada minuto.</p>
+        <p className="text-sm text-muted-foreground">{w.nothingYet}</p>
       )}
       {machine.data && items.length > 0 && (
         <div className="grid gap-4">
@@ -472,13 +393,13 @@ export function MachinePage() {
                 onClick={() => setShowGone((v) => !v)}
                 className="min-h-9 rounded-full px-3 text-xs font-medium text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               >
-                {showGone ? "Ocultar detenidos" : `Mostrar ${gone} ${gone === 1 ? "detenido" : "detenidos"}`}
+                {showGone ? w.hideStopped : w.showStopped(gone)}
               </button>
             )}
           </div>
           <div role="tabpanel" id={`panel-${tab.id}`} aria-labelledby={`tab-${tab.id}`}>
             {groups.length === 0 ? (
-              <p className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">{tab.empty}</p>
+              <p className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">{w.tabs[tab.id].empty}</p>
             ) : (
               <div className="grid items-start gap-4 xl:grid-cols-2">
                 {groups.map((g) => <GroupCard key={g.id} g={g} nowMs={nowMs} />)}
@@ -486,6 +407,8 @@ export function MachinePage() {
             )}
           </div>
         </div>
+      )}
+      </div>
       )}
     </div>
   );

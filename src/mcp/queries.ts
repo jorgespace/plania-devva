@@ -14,16 +14,14 @@ import { iso, type Ctx, type Q } from "./tx.js";
 import { summarize } from "./summary.js";
 import { whyChainOf } from "./goals.js";
 import { initiativeState } from "./initiative-state.js";
+import { ST } from "../state/status.js";
+import { claimable } from "../state/workable.js";
 
 export { ToolError };
 
 // The clock a read compares leases and blockers against. Inside a write it is the write's own reading
 // (what SQL now() was there); anywhere else, the time the read runs.
 const clockOf = (r: Reader): Date => (r as Partial<UnitOfWork>).now ?? new Date();
-
-// Claimable: Backlog or Ready, or In progress whose lease is gone (stale_claim).
-const claimableNow = (t: Task, now: Date) =>
-  t.status === "Backlog" || t.status === "Ready" || (t.status === "In progress" && (t.leaseUntil === null || t.leaseUntil < now));
 
 // Sorting by priority (P0 first, P3 last, null after everything) is left to the store: ascending order
 // puts nulls last, and the text order of P0..P3 is already correct.
@@ -391,9 +389,9 @@ export async function writeReply<E extends Record<string, unknown>>(
 export { claimShape };
 
 export async function projectCounts(db: Q, projectId: string) {
-  const tickets = (await readerOf(db).find("tasks", { projectId, kind: "ticket" })).filter((t) => t.status !== "Won't do");
+  const tickets = (await readerOf(db).find("tasks", { projectId, kind: "ticket" })).filter((t) => t.status !== ST.wontDo);
   const discovered = (t: Task) => t.origin === "discovered";
-  const settled = (t: Task) => t.status === "In review" || t.status === "Done";
+  const settled = (t: Task) => t.status === ST.inReview || t.status === ST.done;
   return {
     chartered: tickets.filter((t) => !discovered(t)).length,
     charteredSettled: tickets.filter((t) => !discovered(t) && settled(t)).length,
@@ -503,18 +501,17 @@ export async function nextTask(db: Q, projectId: string, initiativeKey?: string)
     if (!initiative || initiative.kind !== "initiative") throw new ToolError("INITIATIVE_NOT_FOUND");
     where.parentId = initiative.id;
   }
+  // PLA-I74-4: the one workable rule (src/state/workable.ts): unblocked, not under an On hold initiative (PLA-161), not
+  // a person's own step. settings.claim_from "ready" means only Ready tickets (and stale claims) are offered.
   // The store sorts by priority (null last) then key, so both keep the database's text order.
-  let rows = (await r.find("tasks", where, { orderBy: [{ column: "priority" }, { column: "key" }] })).filter((t) => claimableNow(t, now));
-  // settings.claim_from: "ready" means only Ready tickets (and stale claims) are offered.
-  if (p?.settings.claim_from === "ready") rows = rows.filter((t) => t.status !== "Backlog");
-  const blocked = await blockedTaskIds(r, projectId, rows.map((t) => t.id), now);
-  rows = rows.filter((t) => !blocked.has(t.id));
-  // 2.12: within a priority, what Jorge asked for (origin jorge) comes first. Each priority keeps the
+  const found = await r.find("tasks", where, { orderBy: [{ column: "priority" }, { column: "key" }] });
+  const rows = await claimable(r, found, { backlog: p?.settings.claim_from !== "ready" }, now);
+  // 2.12: within a priority, what the owner asked for (origin owner) comes first. Each priority keeps the
   // rank the store gave it, and the sort is stable, so key order holds inside each group.
   const rank = new Map<string | null, number>();
   for (const t of rows) if (!rank.has(t.priority)) rank.set(t.priority, rank.size);
-  const jorgeFirst = (t: Task) => (t.origin === "jorge" ? 0 : 1);
-  rows.sort((a, b) => rank.get(a.priority)! - rank.get(b.priority)! || jorgeFirst(a) - jorgeFirst(b));
+  const ownerFirst = (t: Task) => (t.origin === "owner" ? 0 : 1);
+  rows.sort((a, b) => rank.get(a.priority)! - rank.get(b.priority)! || ownerFirst(a) - ownerFirst(b));
   const t = rows[0];
   if (!t) return { task: null };
   const parent = t.parentId ? await r.get("tasks", { id: t.parentId }) : undefined;
@@ -528,9 +525,9 @@ export async function nextTask(db: Q, projectId: string, initiativeKey?: string)
       priority: t.priority,
       parent_key: parent?.key ?? null,
       blocked_by: await blockerList(db, t),
-      stale_claim: t.status === "In progress",
+      stale_claim: t.status === ST.inProgress,
       workspace: t.workspace,
-      request: t.origin === "jorge",
+      request: t.origin === "owner",
     },
   };
 }

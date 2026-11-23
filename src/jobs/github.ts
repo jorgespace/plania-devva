@@ -1,6 +1,7 @@
 import type { Db } from "../db/client.js";
 import { runInGroup, type GroupRun } from "./gh-process.js";
 import { oneLine, readTokenFile } from "./gh-token.js";
+import { ghLoginOn } from "../install-state.js";
 import { commandPath } from "./machine/run.js";
 import type { Project, Task } from "../db/schema.js";
 import { storeOf, readerOf } from "../store/port.js";
@@ -8,12 +9,15 @@ import type { UnitOfWork, Where } from "../store/types.js";
 import { DRIFT_STATUSES } from "../mcp/audit.js";
 import { touchBranch } from "../mcp/branches.js";
 import { addResult } from "../mcp/evidence.js";
-import { findTask, prRowOf } from "../mcp/queries.js";
-import { compareKey, releaseCompareOf, releasePlan, type ReleaseCompare } from "../mcp/release-plan.js";
+import { findProject, findTask, prRowOf } from "../mcp/queries.js";
+import { compareKey, migrationFiles, releaseCompareOf, releasePlan, type ReleaseCompare } from "../mcp/release-plan.js";
 import { recordRelease } from "../mcp/releases.js";
 import { SYSTEM_ACTOR, writeTx, type Ctx } from "../mcp/tx.js";
+import { setEnv } from "../mcp/env.js";
+import { probeLive, productionUrlOf, readDeployTruth, writeDeployTruth } from "./deploy-truth.js";
 import { setTask, setTaskLinks } from "../mcp/writes.js";
 import type { Job } from "./index.js";
+import { defineWords, say } from "../words.js";
 
 // The GitHub poller (R-21, R-12, R-09, R-17). Outbound only: the server is not reachable, so it
 // asks GitHub every minute, with ETags, for the repo named in projects.settings.github:
@@ -35,7 +39,7 @@ import type { Job } from "./index.js";
 // The clock is deps.now.
 // The token is never written to the log, an event or poll_state.
 
-export type Fetch = (url: string, init?: { headers?: Record<string, string> }) => Promise<{ status: number; headers: { get(name: string): string | null }; json(): Promise<unknown> }>;
+export type Fetch = (url: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<{ status: number; headers: { get(name: string): string | null }; json(): Promise<unknown> }>;
 
 type Pr = {
   number: number;
@@ -57,7 +61,7 @@ type Review = { id: number; state: string; submitted_at?: string | null };
 // Reviews that ask Taller for something. An approval needs no wake.
 const REVIEW_WAKES = ["CHANGES_REQUESTED", "COMMENTED"];
 type Branch = { name: string; commit: { sha: string } };
-type Compare = { status: "ahead" | "behind" | "identical" | "diverged"; ahead_by?: number; behind_by?: number; commits?: { sha: string }[] };
+type Compare = { status: "ahead" | "behind" | "identical" | "diverged"; ahead_by?: number; behind_by?: number; commits?: { sha: string }[]; files?: { filename: string; status: string }[] };
 
 export type GithubDeps = {
   fetch: Fetch;
@@ -99,7 +103,7 @@ function ghAuthEnv(env: Record<string, string | undefined>): NodeJS.ProcessEnv {
   return merged;
 }
 
-// Env var, then the token file, then (only with PLANIA_GH_FALLBACK=1) `gh auth token`.
+// Env var, then the token file, then `gh auth token` (PLANIA_GH_FALLBACK=1, or an install made by first start).
 // `source` is the poll_state error when there is no token.
 export async function githubToken(deps: GithubDeps, cfg: { token_env?: string }): Promise<{ token: string | null; source: string }> {
   const env = deps.env ?? process.env;
@@ -112,7 +116,8 @@ export async function githubToken(deps: GithubDeps, cfg: { token_env?: string })
   const fromFile = oneLine(file.token);
   if (fromFile) return { token: fromFile, source: "~/.config/plania/github-token" };
 
-  const fallback = deps.fallback ?? env.PLANIA_GH_FALLBACK === "1";
+  // PLA-I2-5: on for an install made by first start (ghLoginOn), else only with PLANIA_GH_FALLBACK=1.
+  const fallback = deps.fallback ?? ghLoginOn(env as NodeJS.ProcessEnv);
   if (!fallback) return { token: null, source: gap };
 
   const now = deps.now?.getTime() ?? Date.now();
@@ -449,6 +454,10 @@ export async function pollGithubProject(db: Db, p: Project, deps: GithubDeps): P
     // PLA-03: a merged PR whose ticket has not reached In review is said once, never moved.
     summary.drift = await flagStatusDrift(db, p, cfg.repo);
 
+    // PLA-I74-8: with the host set and no host token, the host's own commit statuses on the release branch say
+    // whether production built, failed or still builds.
+    summary.host = await pollHostStatuses(db, p, deps, token, cfg.repo);
+
     // 4. Merged tickets whose merge commit the release target now contains.
     summary.released = await releaseMerged(db, p, async (merge, env) => {
       const cacheKey = `cmp:${merge}:${env}`;
@@ -495,6 +504,8 @@ async function pollRelease(db: Db, p: Project, deps: GithubDeps, token: string, 
       status: c.status,
       contains: c.status === "behind" || c.status === "identical",
       commits: (c.commits ?? []).slice(-50).map((x) => x.sha.slice(0, 7)),
+      // PLA-82 (F-32): the database migrations the release adds, from the same response (no extra request).
+      migration_files: migrationFiles(c.files ?? []),
     };
   }
   // Shipped: the last compare had from ahead, this one finds it inside into.
@@ -562,6 +573,57 @@ export async function flagStatusDrift(db: Db, p: Project, repo: string): Promise
 export const releaseBranchOf = (p: Pick<Project, "settings">): string => p.settings.release?.into ?? "main";
 export const mayReleaseByBranch = (p: Pick<Project, "settings">): boolean => p.settings.release_on === "branch" || (p.settings.release_on === undefined && !p.settings.vercel);
 
+// PLA-I74-8: the commit statuses a host posts to GitHub (Vercel, Netlify, Render…), read when the host is set but
+// Plania has no token for it. The release branch's head is the production commit: a red status is a failed
+// production build (its description is the excerpt; GitHub carries no log), a green one counts once the production
+// URL answers, and then the head becomes the release target's commit so Merged tickets move to Released.
+export const HOST_CONTEXT = /vercel|netlify|render|railway|cloudflare|deploy|fly\.io|heroku/i;
+export async function pollHostStatuses(db: Db, p: Project, deps: GithubDeps, token: string, repo: string): Promise<number> {
+  const host = p.settings.vercel;
+  if (!host?.project_id || (deps.env ?? process.env)[host.token_env ?? "VERCEL_TOKEN"]) return 0;
+  // Only once the Vercel poller has said it has no token (its job runs every minute): while it reads the host itself,
+  // or before it has run, there is nothing to fall back from. Its env may differ from this poller's.
+  const vercelPoll = await readerOf(db).get("pollState", { projectId: p.id, source: "vercel" });
+  if (!vercelPoll?.error?.startsWith("no token")) return 0;
+  const branch = releaseBranchOf(p);
+  const head = await gh(deps, token, `/repos/${repo}/branches/${encodeURIComponent(branch)}`);
+  const sha = head.status === 200 ? (head.data as Branch).commit?.sha?.toLowerCase() : undefined;
+  if (!sha) return 0;
+  const combined = await gh(deps, token, `/repos/${repo}/commits/${sha}/status?per_page=100`);
+  type HostStatus = { context: string; state: string; target_url: string | null; description?: string | null; created_at?: string; updated_at?: string };
+  const list = combined.status === 200 && Array.isArray((combined.data as CombinedStatus).statuses) ? ((combined.data as CombinedStatus).statuses as HostStatus[]) : [];
+  const hosts = list.filter((x) => HOST_CONTEXT.test(x.context) && !/preview/i.test(x.context));
+  if (!hosts.length) return 0;
+  const failed = hosts.find((x) => x.state === "failure" || x.state === "error");
+  const green = hosts.every((x) => x.state === "success");
+  const main = failed ?? hosts.find((x) => x.state !== "success") ?? hosts[0]!;
+  const id = `${main.context}@${sha}`;
+  const before = await readDeployTruth(db, p.id);
+  // A settled answer for this very commit is not asked again.
+  if (before?.deployment_id === id && (before.state === "live" || before.state === "error")) return 0;
+  const now = deps.now ?? new Date();
+  const base = { provider: "github" as const, deployment_id: id, sha, url: main.target_url, created_at: main.updated_at ?? main.created_at ?? now.toISOString() };
+  if (failed) {
+    const log = [`${failed.context}: ${failed.state}`, failed.description ?? "", failed.target_url ?? ""].filter(Boolean).join("\n");
+    await writeDeployTruth(db, p.id, { ...base, state: "error", probe_url: null, probe_status: null, log }, now);
+    return 1;
+  }
+  if (!green) {
+    await writeDeployTruth(db, p.id, { ...base, state: "building", probe_url: null, probe_status: null, log: null }, now);
+    return 0;
+  }
+  const probeUrl = await productionUrlOf(db, p, main.target_url);
+  const live = probeUrl ? await probeLive(deps.fetch, probeUrl) : { ok: false, status: null };
+  await writeDeployTruth(db, p.id, { ...base, state: live.ok ? "live" : "checking", probe_url: probeUrl, probe_status: live.status, log: null }, now);
+  if (!live.ok) return 0;
+  await setEnv(
+    db,
+    { project: p.slug, env: p.settings.release_target ?? "prod", commit: sha, commits: [sha], branch, deployed: { provider: "github-status", deployment_id: id, ...(main.target_url ? { url: main.target_url } : {}) } },
+    { actor: { ...SYSTEM_ACTOR, machine: "poller" }, requestId: `host-status:${id}`, tool: "jobs.github" },
+  );
+  return 1;
+}
+
 // Merged → Released once the release target contains the merge commit. env mode: the env's commit is
 // the merge commit, env_commits lists it, or contains() says so (GitHub compare). branch mode: the
 // release branch head is the merge commit or contains() says so.
@@ -626,6 +688,41 @@ export async function closeReleased(db: Db, p: Project): Promise<number> {
     );
     closed++;
   }
+  await settleInitiatives(db, p);
+  return closed;
+}
+
+// PLA-82 (F-33, F-34): an initiative whose steps are all finished said the old «MIA-I9-3 en revisión… sigue MIA-I9-4»
+// and waited ten minutes for «Cerrar iniciativa». Once every step is merged or released its next action says that
+// only publishing is left; once every step is Done (the release rule above closed the last one) it closes itself.
+// settings.auto_done false keeps both off, as for the tickets.
+// PLA-I2-10: both lines in the install's language; the Spanish is unchanged.
+export const SETTLE_WORDS = defineWords({
+  es: { onlyPublishLeft: "Todos sus pasos están hechos; solo falta publicarlos.", closedByRelease: "Se cerró sola: todos sus pasos están publicados." },
+  en: { onlyPublishLeft: "Every step is done; only publishing is left.", closedByRelease: "Closed by itself: every step is published." },
+});
+/** The Spanish lines, kept for the tests that import them (test/pla82-publicar.test.ts). */
+export const ONLY_PUBLISH_LEFT = SETTLE_WORDS.es.onlyPublishLeft;
+export const CLOSED_BY_RELEASE = SETTLE_WORDS.es.closedByRelease;
+const FINISHED = ["Done", "Won't do", "Cancelled"];
+export async function settleInitiatives(db: Db, p: Project): Promise<number> {
+  if (p.settings.auto_done === false) return 0;
+  const r = readerOf(db);
+  const open = (await r.find("tasks", { projectId: p.id, kind: "initiative" }, { orderBy: [{ column: "key" }] })).filter((t) => !["Done", "Won't do", "Cancelled"].includes(t.status));
+  let closed = 0;
+  for (const ini of open) {
+    const kids = await r.find("tasks", { parentId: ini.id, kind: "ticket" });
+    if (!kids.length || !kids.some((k) => k.status === "Done" || k.status === "Released" || k.status === "Merged")) continue;
+    const sys = (what: string) => ({ actor: { ...SYSTEM_ACTOR, machine: "poller" }, system: true, requestId: `initiative-${what}:${ini.key}:${ini.version}`, tool: "jobs.release" });
+    if (kids.every((k) => FINISHED.includes(k.status))) {
+      const line = say(SETTLE_WORDS).closedByRelease;
+      await setTask(db, { project: p.slug, key: ini.key, status: "Done", next_action: line, note: line } as never, sys("done"));
+      closed++;
+    } else if (kids.every((k) => FINISHED.includes(k.status) || k.status === "Merged" || k.status === "Released") && ![SETTLE_WORDS.es.onlyPublishLeft, SETTLE_WORDS.en.onlyPublishLeft].includes(ini.nextAction ?? "")) {
+      // Either language counts as already said, so a language change does not write the line again.
+      await setTask(db, { project: p.slug, key: ini.key, next_action: say(SETTLE_WORDS).onlyPublishLeft } as never, sys("publish-left"));
+    }
+  }
   return closed;
 }
 
@@ -641,6 +738,33 @@ export async function pollGithub(db: Db, deps: GithubDeps): Promise<Record<strin
     }
   }
   return total;
+}
+
+// PLA-160 (F-35): the Publicar sheet asks for this before it says «nada por publicar». Accepting a delivery merges on
+// GitHub, and the release plan only knows what the last poll saw (up to a minute late), so the sheet said the
+// project had nothing to publish with the start branch already ahead. One poll of that project, at most once per
+// RECHECK_MS per project; a second call inside that window, or while one runs, waits for the same poll.
+export const RECHECK_MS = 15_000;
+const rechecks = new Map<string, { at: number; run: Promise<void> }>();
+export function resetRechecksForTests(): void {
+  rechecks.clear();
+}
+
+export async function recheckGithubProject(db: Db, slug: string, deps: GithubDeps, nowMs = Date.now()): Promise<{ checked: boolean }> {
+  const p = await findProject(db, slug);
+  if (!p.settings.github?.repo) return { checked: false };
+  const last = rechecks.get(p.id);
+  if (last && nowMs - last.at < RECHECK_MS) {
+    await last.run;
+    return { checked: false };
+  }
+  const run = pollGithubProject(db, p, deps).then(
+    () => undefined,
+    (e: unknown) => console.error(`[jobs] github recheck ${p.slug}: ${e instanceof Error ? e.message : String(e)}`),
+  );
+  rechecks.set(p.id, { at: nowMs, run });
+  await run;
+  return { checked: true };
 }
 
 export const githubJob: Job = {

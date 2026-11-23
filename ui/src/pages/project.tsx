@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Building2Icon, ChevronLeftIcon, ListIcon, WaypointsIcon } from "lucide-react";
+import { Building2Icon, ChevronLeftIcon, ListIcon, Settings2Icon, WaypointsIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StageBoard } from "@/components/plan/stage-board";
 import { AhoraLine } from "@/components/plan/ahora-line";
 import { ahoraView } from "@/lib/ahora-piso";
+import { listedProjects } from "@/lib/proyectos-visibles";
 import {
   BranchGraph,
   FichaSheet,
@@ -28,18 +29,24 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { toast } from "sonner";
 import { TaskSheet } from "@/components/task-sheet";
 import { api, ApiError, type OrgProject } from "@/lib/api";
+import { listoAviso } from "@/lib/listo";
+import { words } from "@/lib/i18n";
+import { PROJECT_PAGE } from "@/lib/project-page-words";
+import { linkTo } from "@/lib/corriente";
+import { ListoLista } from "@/components/listo";
 import { branchEdges, buildLanes, projectProgress, statusCounts } from "@/lib/lanes";
 import { cn } from "@/lib/utils";
 
 type View = "lanes" | "lista";
 
 function ViewToggle({ view, onChange }: { view: View; onChange: (v: View) => void }) {
+  const w = words(PROJECT_PAGE);
   const options: { value: View; label: string; icon: typeof ListIcon }[] = [
-    { value: "lanes", label: "Líneas", icon: WaypointsIcon },
-    { value: "lista", label: "Lista", icon: ListIcon },
+    { value: "lanes", label: w.lanes, icon: WaypointsIcon },
+    { value: "lista", label: w.list, icon: ListIcon },
   ];
   return (
-    <div role="group" aria-label="Vista" className="inline-flex rounded-full border bg-card p-1">
+    <div role="group" aria-label={w.view} className="inline-flex rounded-full border bg-card p-1">
       {options.map(({ value, label, icon: Icon }) => (
         <button
           key={value}
@@ -71,6 +78,7 @@ function PageSkeleton() {
 // PLA-I33-2: the top of /p/<slug>: light, goal, plumbing line, Pausar/Reanudar; the team with Añadir al
 // equipo; the thread with the PO ("Dile al PO…"). The one Pedir: a message here wakes the PO.
 function ProjectOrg({ slug }: { slug: string }) {
+  const w = words(PROJECT_PAGE);
   const client = useQueryClient();
   const comp = useQuery({ queryKey: ["company"], queryFn: api.company, staleTime: 10_000, refetchInterval: 20_000 });
   const detail = useQuery({ queryKey: ["company-project", slug], queryFn: () => api.companyProject(slug), refetchInterval: 30_000 });
@@ -85,6 +93,10 @@ function ProjectOrg({ slug }: { slug: string }) {
   const [add, setAdd] = useState<AddState>({ kind: "idle" });
   const [stop, setStop] = useState(false);
   const [goalOpen, setGoalOpen] = useState(false);
+  // NEWPROJ-4: one quiet line while something stops a run here; it opens the readiness list.
+  const listo = useQuery({ queryKey: ["readiness", slug], queryFn: () => api.readiness(slug), refetchInterval: 60_000 });
+  const [listoOpen, setListoOpen] = useState(false);
+  const aviso = listo.data ? listoAviso(listo.data) : null;
   const goals = useQuery({ queryKey: ["goals"], queryFn: () => api.goals(), enabled: goalOpen });
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["company"] });
@@ -97,19 +109,19 @@ function ProjectOrg({ slug }: { slug: string }) {
       setAdd({ kind: "done", agent: r.agent.agent });
       refresh();
     },
-    onError: (e) => setAdd({ kind: "error", message: e instanceof ApiError ? `No se pudo añadir (${e.code}).` : "No se pudo añadir." }),
+    onError: (e) => setAdd({ kind: "error", message: e instanceof ApiError ? w.addFailedCode(e.code) : w.addFailed }),
   });
   const pause = useMutation({
     mutationFn: (paused: boolean) => api.setProjectPaused(slug, paused),
     onSuccess: (r) => {
-      toast(r.paused ? "En pausa" : "Reanudado");
+      toast(r.paused ? w.paused : w.resumed);
       setStop(false);
       refresh();
     },
-    onError: () => toast.error("No se pudo cambiar el interruptor del proyecto"),
+    onError: () => toast.error(w.switchFailed),
   });
 
-  if (comp.isError && detail.isError) return <BlockError what="el equipo" onRetry={() => { void comp.refetch(); void detail.refetch(); }} />;
+  if (comp.isError && detail.isError) return <BlockError what={w.theTeam} onRetry={() => { void comp.refetch(); void detail.refetch(); }} />;
   if (!project) return comp.isPending ? <Skeleton className="h-48 rounded-[22px]" /> : null;
   const paused = project.paused || project.light === "paused";
   const timeZone = comp.data?.week.timezone;
@@ -123,9 +135,36 @@ function ProjectOrg({ slug }: { slug: string }) {
         onPause={() => setStop(true)}
         onResume={() => pause.mutate(false)}
       />
+      {aviso && (
+        <button type="button" className="-mt-2 justify-self-start text-left text-sm text-ink-now underline-offset-4 hover:underline" onClick={() => setListoOpen(true)} data-control="ver-listo">
+          {aviso} <span className="text-muted-foreground">{w.seeMissing}</span>
+        </button>
+      )}
+      <Sheet open={listoOpen && !!listo.data} onOpenChange={setListoOpen}>
+        <SheetContent side="bottom" className="mx-auto max-h-[85svh] w-full max-w-xl overflow-y-auto rounded-t-[22px] bg-background">
+          <SheetHeader className="pr-10">
+            <SheetTitle className="font-display text-2xl font-extrabold tracking-tight">{w.missingTitle(project.title)}</SheetTitle>
+            <SheetDescription>{aviso ?? w.nothingMissing}</SheetDescription>
+          </SheetHeader>
+          <div className="px-4 pb-8">
+            {listo.data && (
+              <ListoLista
+                r={listo.data}
+                look="page"
+                ajustes={
+                  // NEWPROJ-6: what is missing is set in the project's Ajustes door.
+                  <Link to={linkTo({ slug, tab: "ajustes" })} className="inline-flex min-h-11 items-center justify-self-start rounded-full border bg-card px-4 text-sm font-medium hover:bg-foreground/5" data-control="ir-ajustes">
+                    {w.openSettings}
+                  </Link>
+                }
+              />
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
       <div className="grid min-w-0 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
         {detail.isError ? (
-          <BlockError what="el equipo" onRetry={() => void detail.refetch()} />
+          <BlockError what={w.theTeam} onRetry={() => void detail.refetch()} />
         ) : (
           <ProjectTeam
             project={slug}
@@ -140,20 +179,20 @@ function ProjectOrg({ slug }: { slug: string }) {
         )}
         <ThreadPanel
           title="PO"
-          subtitle={<p className="-mt-2 text-xs text-muted-foreground">Lo que le pidas se vuelve un ticket suyo y despierta.</p>}
+          subtitle={<p className="-mt-2 text-xs text-muted-foreground">{w.poHint}</p>}
           project={slug}
           now={now}
           timeZone={timeZone}
-          placeholder="Dile al PO…"
-          readOnly={paused ? "En pausa: el PO no despierta. Reanuda el proyecto para escribirle." : null}
+          placeholder={w.poPlaceholder}
+          readOnly={paused ? w.poPaused : null}
           {...po}
         />
       </div>
       <Sheet open={stop} onOpenChange={setStop}>
         <SheetContent side="bottom" className="mx-auto max-h-[85svh] w-full max-w-xl overflow-y-auto rounded-t-[22px] bg-background">
           <SheetHeader className="pr-10">
-            <SheetTitle className="font-display text-2xl font-extrabold tracking-tight">¿Pausar {project.title}?</SheetTitle>
-            <SheetDescription>Se puede deshacer: reanudas cuando quieras.</SheetDescription>
+            <SheetTitle className="font-display text-2xl font-extrabold tracking-tight">{w.pauseTitle(project.title)}</SheetTitle>
+            <SheetDescription>{w.pauseNote}</SheetDescription>
           </SheetHeader>
           <div className="px-4 pb-8">
             <StopBody
@@ -172,7 +211,7 @@ function ProjectOrg({ slug }: { slug: string }) {
           open
           fixedProject={slug}
           goal={(goals.data?.goals ?? []).find((g) => g.project === slug && g.status === "active") ?? null}
-          projects={(comp.data?.projects ?? []).map((p) => ({ slug: p.slug, title: p.title }))}
+          projects={listedProjects(comp.data?.projects ?? [], slug).map((p) => ({ slug: p.slug, title: p.title }))}
           parents={(goals.data?.goals ?? []).filter((g) => g.project === null)}
           onOpenChange={(open) => {
             if (open) return;
@@ -187,6 +226,7 @@ function ProjectOrg({ slug }: { slug: string }) {
 
 // PLA-I53-4: the floor's Ahora line, built from the same company card the floor reads, so it says the same words.
 function ProjectAhora({ slug }: { slug: string }) {
+  const w = words(PROJECT_PAGE);
   const comp = useQuery({ queryKey: ["company"], queryFn: api.company, staleTime: 10_000, refetchInterval: 20_000 });
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -197,13 +237,14 @@ function ProjectAhora({ slug }: { slug: string }) {
   if (!card) return null;
   const view = ahoraView(card, now, { companyPaused: comp.data?.company.paused ?? false, timeZone: comp.data?.week.timezone });
   return (
-    <section className="rounded-[20px] border bg-card px-5 py-4" aria-label="Ahora" data-section="ahora">
+    <section className="rounded-[20px] border bg-card px-5 py-4" aria-label={w.now} data-section="ahora">
       <AhoraLine view={view} />
     </section>
   );
 }
 
 export function ProjectPage() {
+  const w = words(PROJECT_PAGE);
   const { slug = "" } = useParams();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -255,8 +296,8 @@ export function ProjectPage() {
     const notFound = project.error instanceof ApiError && project.error.status === 404;
     return (
       <div className="grid gap-2">
-        <p>{notFound ? "Ese proyecto no existe." : "No se pudo cargar el proyecto."}</p>
-        <Link to="/" className="text-sm text-muted-foreground underline">Volver a proyectos</Link>
+        <p>{notFound ? w.notFound : w.loadFailed}</p>
+        <Link to="/" className="text-sm text-muted-foreground underline">{w.backToProjects}</Link>
       </div>
     );
   }
@@ -273,7 +314,7 @@ export function ProjectPage() {
     <div className="grid grid-cols-1 gap-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <Link to="/" className="inline-flex min-h-9 items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground">
-          <ChevronLeftIcon className="size-4" /> Proyectos
+          <ChevronLeftIcon className="size-4" /> {w.projects}
         </Link>
         <div className="flex flex-wrap items-center gap-3">
           {/* PLA-I53-5: the way back to this project's floor in Compañía. */}
@@ -282,7 +323,15 @@ export function ProjectPage() {
             className="inline-flex min-h-9 items-center gap-1.5 rounded-full border bg-card px-3.5 text-[13px] font-medium hover:bg-foreground/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             data-control="ver-piso"
           >
-            <Building2Icon className="size-3.5" aria-hidden /> Ver el piso
+            <Building2Icon className="size-3.5" aria-hidden /> {w.seeFloor}
+          </Link>
+          {/* NEWPROJ-6: the project's settings (La corriente's Ajustes door). */}
+          <Link
+            to={linkTo({ slug, tab: "ajustes" })}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-full border bg-card px-3.5 text-[13px] font-medium hover:bg-foreground/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            data-control="ajustes"
+          >
+            <Settings2Icon className="size-3.5" aria-hidden /> {w.settings}
           </Link>
           <ViewToggle view={view} onChange={(v) => setParam("view", v === "lista" ? "lista" : null)} />
         </div>
@@ -305,7 +354,7 @@ export function ProjectPage() {
           />
           <ProjectOrg slug={slug} />
           <GoalsProject slug={slug} />
-          {/* Questions agents asked Jorge (Needs Jorge): answer in place, with an optional line for the decision log. */}
+          {/* Questions agents asked the owner (Needs owner): answer in place, with an optional line for the decision log. */}
           <QuestionsPanel slug={slug} questions={project.data.resume.open_questions} onOpen={openTask} />
           <ProjectAhora slug={slug} />
 
@@ -314,10 +363,10 @@ export function ProjectPage() {
           ) : derived.lanes.length === 0 && ideas.length === 0 ? (
             <div className="flex flex-wrap items-start gap-7">
               <section className="grid min-w-0 flex-[999_1_560px] animate-rise gap-3 rounded-[20px] border border-dashed bg-card/50 px-5 py-6 sm:px-6 sm:py-8">
-                <Kicker className="text-muted-foreground">Nada abierto</Kicker>
+                <Kicker className="text-muted-foreground">{w.nothingOpen}</Kicker>
                 {nowText && <p className="text-[15px] text-muted-foreground">{nowText}</p>}
-                <Kicker className="mt-2 text-ink-ready">Siguiente</Kicker>
-                <p className="font-display text-2xl font-bold tracking-tight">{nextText || "Sin iniciativas ni tickets abiertos."}</p>
+                <Kicker className="mt-2 text-ink-ready">{w.next}</Kicker>
+                <p className="font-display text-2xl font-bold tracking-tight">{nextText || w.noneOpen}</p>
               </section>
               <aside className="grid min-w-0 flex-[1_1_320px] gap-4 sm:min-w-[280px]">
                 <BranchGraph edges={derived.edges} />
@@ -328,7 +377,7 @@ export function ProjectPage() {
             <>
               {hasBoard && (
                 <section className="grid min-w-0 gap-3" data-section="tablero">
-                  <SectionTitle hint="una fila por iniciativa; cada ticket en la estación de quien lo tiene, como en el piso">En paralelo</SectionTitle>
+                  <SectionTitle hint={w.boardHint}>{w.inParallel}</SectionTitle>
                   <StageBoard
                     tablero={tablero!}
                     now={now}
@@ -338,7 +387,7 @@ export function ProjectPage() {
                     onDone={(key) => key && openTask(key)}
                     folded={folded}
                     onFolded={(key) => openTask(key)}
-                    label={`Tablero de etapas de ${project.data.title}`}
+                    label={w.boardLabel(project.data.title)}
                     className="dark sb-page"
                   />
                 </section>
@@ -346,19 +395,19 @@ export function ProjectPage() {
 
               <div className="grid grid-cols-1 gap-6">
                 <section className="grid min-w-0 gap-3">
-                  <SectionTitle hint="las fases de cada iniciativa; el punto que late es donde estás">Líneas de trabajo</SectionTitle>
+                  <SectionTitle hint={w.linesHint}>{w.workLines}</SectionTitle>
                   {initiativeLanes.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">Sin iniciativas abiertas; solo tickets sueltos.</p>
+                    <p className="text-sm text-muted-foreground">{w.onlyLoose}</p>
                   ) : (
                     <InitiativeTable lanes={initiativeLanes} onOpen={openTask} lines={initiativeLines} />
                   )}
                 </section>
-                <section className="grid min-w-0 gap-3" aria-label="Ideas">
-                  <SectionTitle hint="una fila por idea abierta; al cerrarse, en qué se convirtió">Ideas</SectionTitle>
+                <section className="grid min-w-0 gap-3" aria-label={w.ideas}>
+                  <SectionTitle hint={w.ideasHint}>{w.ideas}</SectionTitle>
                   <IdeasTable ideas={ideas} onOpen={openTask} />
                 </section>
                 <aside className="grid gap-3">
-                  <SectionTitle>Contexto</SectionTitle>
+                  <SectionTitle>{w.context}</SectionTitle>
                   <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2">
                     <BranchGraph edges={derived.edges} />
                     <FixedDecisions items={fixed} onFicha={() => setFichaOpen(true)} />

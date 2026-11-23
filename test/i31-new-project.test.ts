@@ -32,6 +32,10 @@ before(async () => {
   promptDocId = (
     await store.fix((uow) => uow.insert("docs", { projectId: micasa, title: "Prompt: Product owner", markdown: "# PO", actor: { agent: "test", session_id: "s" } }))
   ).id;
+  // NEWPROJ-2: the sheet needs a prompt for every core seat, not only the PO's.
+  await store.fix(async (uow) => {
+    for (const title of ["Prompt: Research", "Prompt: Artist", "Prompt: Taller"]) await uow.insert("docs", { projectId: micasa, title, markdown: "# prompt", actor: { agent: "test", session_id: "s" } });
+  });
 });
 
 after(async () => {
@@ -139,7 +143,7 @@ test("I31-3: without the Prompt: Product owner doc nothing is created (409 PROMP
   try {
     const res = await post({ name: "Sin Prompt", goal: "Meta." });
     assert.equal(res.status, 409);
-    assert.deepEqual(await res.json(), { error: "PROMPT_DOC_MISSING" });
+    assert.deepEqual(await res.json(), { error: "PROMPT_DOC_MISSING", seats: ["product-owner"] });
     assert.equal(await store.count("projects", { slug: "sin-prompt" }), 0);
   } finally {
     await store.fix((uow) => uow.update("docs", { id: promptDocId }, { title: "Prompt: Product owner" }));

@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { CloudOffIcon } from "lucide-react";
 import { useEffect, useRef } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router";
+import { Navigate, Route, Routes, useLocation, useParams } from "react-router";
 import { AppShell } from "@/components/app-shell";
+import { LanguageSync } from "@/components/language-sync";
 import { PlaniaMark } from "@/components/plania-mark";
 import { Button } from "@/components/ui/button";
 import { api, isUnauthorized } from "@/lib/api";
@@ -10,14 +11,19 @@ import { useOnline } from "@/lib/live";
 import { InboxPage } from "@/pages/inbox";
 import { LoginPage } from "@/pages/login";
 import { MachinePage } from "@/pages/machine";
+import { FaltaPage } from "@/pages/falta";
+import { NovedadesPage } from "@/pages/novedades";
+import { PrimerArranqueFaltaPage, PrimerArranquePage } from "@/pages/primer-arranque";
+import { LimitesPage } from "@/pages/limites";
 import { HomePage } from "@/pages/home";
 import { ProjectPage } from "@/pages/project";
 import { ProgressDayPage, ProgressItemPage, ProgressProjectPage, ProgressYearPage } from "@/pages/progreso-detail";
 import { ProgresoPage } from "@/pages/progreso";
 import { TokensPage } from "@/pages/tokens";
-import { CeoPage } from "@/pages/ceo";
-import { BriefPage } from "@/pages/brief";
+import { CeoPage, CorrienteRedirect } from "@/pages/ceo";
+import { CalidadPage } from "@/pages/calidad";
 import { LEGACY_REDIRECTS } from "@/lib/compania";
+import { oldProjectHref } from "@/lib/corriente";
 
 // What the cached app shows when the server can't be reached, e.g. a home-screen launch with no network.
 // It retries on its own when the network comes back.
@@ -58,29 +64,51 @@ function RequireSession({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// PLA-113: /p/<slug> opens La corriente unless Ajustes asked for the old page (?pagina). PLA-135: it was Archivo.
+function ProjectRoute() {
+  const { slug = "" } = useParams();
+  const location = useLocation();
+  const to = oldProjectHref(slug, location.search);
+  return to ? <Navigate to={to} replace /> : <ProjectPage />;
+}
+
 export function App() {
   return (
-    <Routes>
+    <>
+      {/* PLA-I2-10: the screen follows the install's language. */}
+      <LanguageSync />
+      <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/primer-arranque" element={<PrimerArranquePage />} />
+      <Route path="/primer-arranque/falta" element={<PrimerArranqueFaltaPage />} />
       <Route element={<RequireSession><AppShell /></RequireSession>}>
         <Route index element={<HomePage />} />
-        <Route path="/p/:slug" element={<ProjectPage />} />
+        <Route path="/p/:slug" element={<ProjectRoute />} />
         <Route path="/inbox" element={<InboxPage />} />
         <Route path="/machine" element={<MachinePage />} />
+        <Route path="/machine/falta" element={<FaltaPage />} />
+        <Route path="/novedades" element={<NovedadesPage />} />
+        <Route path="/machine/limites" element={<LimitesPage />} />
         <Route path="/progreso" element={<ProgresoPage />} />
         <Route path="/progreso/dia/:date" element={<ProgressDayPage />} />
         <Route path="/progreso/anio/:year" element={<ProgressYearPage />} />
         <Route path="/progreso/proyecto/:slug" element={<ProgressProjectPage />} />
         <Route path="/progreso/:slug/:key" element={<ProgressItemPage />} />
         <Route path="/ceo" element={<CeoPage />} />
-        <Route path="/brief" element={<BriefPage />} />
+        {/* PLA-I62-9: La corriente was built at /corriente; it is Compañía now. */}
+        <Route path="/corriente" element={<CorrienteRedirect />} />
+        {/* PLA-I63-5: the brief lives in Compañía; the old address stays for saved links and notices. */}
+        <Route path="/brief" element={<Navigate to="/ceo?v=brief" replace />} />
         {/* PLA-I30-2: Ahora, Metas and Equipo live on Compañía now. */}
         {Object.entries(LEGACY_REDIRECTS).map(([from, to]) => (
           <Route key={from} path={from} element={<Navigate to={to} replace />} />
         ))}
         <Route path="/tokens" element={<TokensPage />} />
+        {/* AUDIT-5: the quality scoreboard. */}
+        <Route path="/calidad" element={<CalidadPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
-    </Routes>
+      </Routes>
+    </>
   );
 }

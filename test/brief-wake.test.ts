@@ -3,7 +3,7 @@
 // test store; every process is a fake child; nothing reaches a real claude or repo.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -29,6 +29,9 @@ type Json = Record<string, any>;
 let store: TestStore;
 let db: ReturnType<typeof makeDb>["db"];
 const scratch = mkdtempSync(path.join(tmpdir(), "plania-brief-wake-"));
+// PLA-65: the seeded projects' checkouts live in the scratch folder, not in ~/Developer/Projects (absent on CI).
+const projectsDir = path.join(scratch, "projects");
+for (const slug of ["micasa", "workia", "filmia", "zigzag"]) mkdirSync(path.join(projectsDir, slug), { recursive: true });
 const ctx = { actor: { agent: "po-workia", session_id: "s-po", machine: "ci" } };
 const cookie = () => ({ Cookie: `${SESSION_COOKIE}=${createSession()}`, "Content-Type": "application/json" });
 let n = 0;
@@ -63,7 +66,7 @@ class FakeChild extends EventEmitter {
 const spawned: string[][] = [];
 wakeDeps.heartbeat = {
   runner: {
-    env: { HOME: scratch, PATH: "/usr/bin:/bin", PLANIA_RUNNER_TOKEN: "runner-token", PLANIA_PROMPTS_PROJECT: "micasa", CLAUDE_CODE_BIN: "/fake/bin/claude" } as NodeJS.ProcessEnv,
+    env: { HOME: scratch, PLANIA_PROJECTS_ROOT: projectsDir, PATH: "/usr/bin:/bin", PLANIA_RUNNER_TOKEN: "runner-token", PLANIA_PROMPTS_PROJECT: "micasa", CLAUDE_CODE_BIN: "/fake/bin/claude" } as NodeJS.ProcessEnv,
     logDir: path.join(scratch, "logs"),
     tmpDir: path.join(scratch, "tmp"),
     worktreeRoot: path.join(scratch, "worktrees"),
@@ -160,7 +163,7 @@ test("check 2: Give to PO creates exactly one Ready PO ticket, origin jorge, and
   assert.equal(await store.count("tasks"), before + 1);
   const task = (await store.get("tasks", { key }))!;
   const t = { status: task.status, origin: task.origin, scope: task.scope, owner: (await store.get("agents", { id: task.ownerAgent! }))!.slug };
-  assert.deepEqual([t.status, t.origin, t.owner], ["Ready", "jorge", "po-workia"]);
+  assert.deepEqual([t.status, t.origin, t.owner], ["Ready", "owner", "po-workia"]);
   assert.match(t.scope, /Decide the renewal notice[\s\S]*The PO has a draft[\s\S]*Keep it short/);
   const runs = (await runsOf("po-workia")).filter((r) => r.task_key === key);
   assert.equal(runs.length, 1);

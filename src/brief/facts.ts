@@ -201,7 +201,7 @@ async function threadFacts(db: Q, threadId: string | null, readAt: Date | null, 
     const q = m.questionId ? await r.get("questions", { id: m.questionId }) : undefined;
     rows.push({ m, qAnswered: q?.answeredAt ?? null });
   }
-  const unread = await r.count("threadMessages", { threadId, authorAgent: ne("jorge"), ...(readAt ? { at: gt(readAt) } : {}) });
+  const unread = await r.count("threadMessages", { threadId, authorAgent: ne("owner"), ...(readAt ? { at: gt(readAt) } : {}) });
   return {
     unread,
     messages: rows.reverse().map(({ m, qAnswered }) => ({
@@ -253,7 +253,7 @@ async function projectFacts(db: Q, p: Project, s: BriefSettings, w: FactsWindow,
     })),
   );
   const blocked = tickets
-    .filter((t) => t.status === "Blocked" || t.status === "Needs Jorge")
+    .filter((t) => t.status === "Blocked" || t.status === "Needs owner")
     .map((t) => ({ handle: handles.task(t.kind, t.key), key: t.key, title: t.title, status: t.status, note: t.blockedNote ? clip(t.blockedNote, 300) : null }));
   const created = all
     .filter((t) => inWindow(t.createdAt, w))

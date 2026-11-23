@@ -26,12 +26,12 @@ const get = async (path: string): Promise<Json> => {
   return (await res.json()) as Json;
 };
 const keys = (o: Json) => Object.keys(o).sort();
-const STATES = ["running", "idle", "waiting_jorge", "paused"];
-const LIGHTS = ["ok", "needs_jorge", "failed", "blocked", "late", "quiet", "paused"];
+const STATES = ["running", "idle", "waiting_owner", "paused"];
+const LIGHTS = ["ok", "needs_owner", "failed", "blocked", "late", "quiet", "paused"];
 // PLA-I46-5: used is input + output; the four parts travel with it.
 const USAGE = ["cache_create", "cache_read", "input", "output", "used"];
-// PLA-I59-2 added consulta_motor, motor and used_week.
-const MEMBER = ["agent", "consulta_motor", "last", "motor", "next_start", "now", "packs", "produced", "queue", "role", "state", "template", "used_week", "waiting"];
+// PLA-I59-2 added consulta_motor, motor and used_week. PLA-I67-1 added skills_on (the «Oficio» door's count).
+const MEMBER = ["agent", "consulta_motor", "last", "lessons", "motor", "name", "next_start", "now", "packs", "paused_at", "produced", "puesto", "queue", "reports_to", "role", "skills_on", "state", "template", "used_week", "waiting"];
 
 before(async () => {
   store = await resetTestStore();
@@ -85,7 +85,7 @@ after(async () => {
 
 test("I32-6 #1: GET /api/company has exactly the contract keys, a team of four per project and the plumbing line", async () => {
   const c = await get("/api/company");
-  assert.deepEqual(keys(c), ["asistente", "brief", "company", "decisions", "inbox", "motor_default", "plumbing", "projects", "week"], "PLA-I35-1 added decisions, PLA-I36-2 inbox, PLA-I42-5 brief, PLA-I59-2 motor_default");
+  assert.deepEqual(keys(c), ["asistente", "brief", "claude_sign_in", "company", "decisions", "inbox", "motor_default", "plumbing", "projects", "week"], "PLA-I35-1 added decisions, PLA-I36-2 inbox, PLA-I42-5 brief, PLA-I59-2 motor_default, PLA-I2-13 claude_sign_in");
   assert.deepEqual(keys(c.company), ["paused"]);
   assert.deepEqual(keys(c.week), ["resets_at", "starts_at", "timezone"]);
   assert.deepEqual(keys(c.asistente), ["last_run", "state", "thread_id", "unread", "usage"]);
@@ -95,7 +95,7 @@ test("I32-6 #1: GET /api/company has exactly the contract keys, a team of four p
   assert.deepEqual([c.plumbing.running, c.plumbing.paused, c.plumbing.spend], [1, false, 400], "PLA-I46-5: input + output, cache apart");
   assert.deepEqual(c.projects.map((p: Json) => p.slug), ["filmia", "mianovia", "micasa", "workia", "zigzag"]);
   for (const p of c.projects) {
-    assert.deepEqual(keys(p), ["ahora", "auto_accept", "goal", "latest", "light", "light_reason", "next", "next_first", "next_move", "orders", "paused", "pedidos", "plan", "plan_approval", "preview_url", "ready", "route", "rumbo", "runner", "slug", "stale_requests", "tablero", "team", "this_week", "thread", "title", "usage", "work"], p.slug);
+    assert.deepEqual(keys(p), ["ahora", "auto_accept", "goal", "latest", "light", "light_reason", "next", "next_first", "next_move", "orders", "paused", "pedidos", "plan", "plan_approval", "preview_url", "quiet_home", "ready", "route", "rumbo", "runner", "slug", "stale_requests", "tablero", "team", "this_week", "thread", "title", "usage", "work"], p.slug);
     assert.deepEqual(keys(p.usage), ["last_week", "used"]);
     assert.ok(LIGHTS.includes(p.light), p.light);
     assert.deepEqual(keys(p.thread), ["id", "last", "unread"]);
@@ -107,7 +107,7 @@ test("I32-6 #1: GET /api/company has exactly the contract keys, a team of four p
   }
   const mia = c.projects.find((p: Json) => p.slug === "mianovia");
   assert.equal(mia.goal, "Primera boda");
-  assert.equal(mia.light, "needs_jorge");
+  assert.equal(mia.light, "needs_owner");
   const by = Object.fromEntries(mia.team.map((m: Json) => [m.agent, m]));
   assert.equal(by["taller-mianovia"].state, "running");
   assert.deepEqual(keys(by["taller-mianovia"].now), ["run_id", "since", "ticket", "title"]);
@@ -115,7 +115,7 @@ test("I32-6 #1: GET /api/company has exactly the contract keys, a team of four p
   assert.deepEqual(by["research-mianovia"].last.status, "ok");
   assert.deepEqual(keys(by["research-mianovia"].last), ["at", "run_id", "status", "ticket", "title"]);
   assert.deepEqual(by["research-mianovia"].produced, { kind: "doc", ref: "00000000-0000-4000-8000-000000000001", title: "Research" });
-  assert.equal(by["po-mianovia"].state, "waiting_jorge");
+  assert.equal(by["po-mianovia"].state, "waiting_owner");
   assert.equal(by["po-mianovia"].waiting, "¿Papel o digital?");
   assert.equal(by["po-mianovia"].role, "product-owner");
   assert.equal(mia.thread.unread, 1);
@@ -154,7 +154,8 @@ test("I32-6 #2: POST team creates the agent with project_id and role_template an
   assert.equal(res.status, 201);
   const out = (await res.json()) as Json;
   assert.deepEqual(keys(out), ["agent", "team"]);
-  assert.deepEqual([out.agent.agent, out.agent.template, out.agent.role, out.agent.state], ["qa-mianovia", "qa", "qa", "idle"]);
+  // PLA-I71-3: a new seat arrives paused (the owner resumes it from its panel).
+  assert.deepEqual([out.agent.agent, out.agent.template, out.agent.role, out.agent.state], ["qa-mianovia", "qa", "qa", "paused"]);
   assert.deepEqual(out.team.map((m: Json) => m.agent), ["po-mianovia", "research-mianovia", "artist-mianovia", "taller-mianovia", "qa-mianovia"]);
   const a = await store.get("agents", { slug: "qa-mianovia" });
   const project = a?.projectId ? await store.get("projects", { id: a.projectId }) : undefined;

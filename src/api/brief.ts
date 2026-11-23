@@ -23,6 +23,7 @@ import { liveRuns } from "../runner/runner.js";
 import { homeSlug } from "../runner/threads.js";
 import { readerOf } from "../store/port.js";
 import { gte } from "../store/types.js";
+import { loadOwnerName } from "../owner.js";
 
 export const briefApi = new Hono();
 
@@ -196,6 +197,7 @@ briefApi.put("/settings", async (c) => {
   return withDb(async (db) => {
     try {
       await saveBriefSettings(db, body);
+      await loadOwnerName(db); // PLA-I2-14: the brief's owner_name is a fallback for the display name
     } catch (err) {
       if (err instanceof BriefSettingsError) return c.json({ error: "INVALID_SETTINGS", issues: err.issues }, 400);
       throw err;

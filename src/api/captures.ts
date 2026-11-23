@@ -4,13 +4,16 @@
 //   GET /api/projects/:slug/captures/:id.png       one still's PNG
 // PLA-I46-7/8: the read also says whether the test copy is on (prueba), and three clicks act on it, only from the
 // screen (src/captures/prueba.ts):
-//   POST /api/projects/:slug/captures/encender     Encenderla: start the test copy (sandbox) on this Mac
+//   POST /api/projects/:slug/captures/encender     Encenderla: start the test copy (sandbox) on this machine
 //   POST /api/projects/:slug/captures/tomar        Reintentar: take the stills again
 //   POST /api/projects/:slug/captures/apagar       turn Plania's test copy off
 // PLA-I52-2: the delivery's own copy (its PR branch, next to sandbox's), for El Probador:
 //   GET  /api/projects/:slug/entrega               the copy's read (null when off)
 //   POST /api/projects/:slug/entrega/encender      {key}: start the copy of that delivery (its ticket's branch)
 //   POST /api/projects/:slug/entrega/apagar        turn it off
+// PLA-I74-6: «Revisar proyecto» (src/captures/revision.ts):
+//   GET  /api/projects/:slug/revision              the last check-up, the one running, the measured waits
+//   POST /api/projects/:slug/revision              start one (202), or say one is already running
 import { Hono, type Context } from "hono";
 import { withDb } from "../db/client.js";
 import { ToolError } from "../mcp/errors.js";
@@ -19,8 +22,10 @@ import { warmEntrega } from "../captures/entrega.js";
 import { assertKey, probadorRead, probar } from "../captures/probador.js";
 import { startVivo, vivoRead } from "../captures/vivo.js";
 import { preguntar } from "../captures/preguntas.js";
+import { imagenBytes, imagenesRead } from "../captures/imagenes.js";
 import { latestStills, stillFile } from "../captures/store.js";
 import { readerOf } from "../store/port.js";
+import { revisionRead, startRevision } from "../captures/revision.js";
 
 export const captureRoutes = new Hono();
 
@@ -53,6 +58,29 @@ const fail = (c: Context, e: unknown) => {
   if (e instanceof ToolError) return c.json({ error: e.code, ...e.detail }, e.code === "PROJECT_NOT_FOUND" ? 404 : 400);
   throw e;
 };
+
+// PLA-I74-6: «Revisar proyecto». The last check-up (and the one running), and the button that starts one.
+captureRoutes.get("/:slug/revision", async (c) => {
+  try {
+    return c.json({ revision: await withDb((db) => revisionRead(db, c.req.param("slug"))) });
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+captureRoutes.post("/:slug/revision", async (c) => {
+  try {
+    const slug = c.req.param("slug");
+    const out = await withDb(async (db) => {
+      const read = await revisionRead(db, slug);
+      if (!read.available) return { started: false, revision: read };
+      const started = startRevision(db, slug, "owner");
+      return { started, revision: await revisionRead(db, slug) };
+    });
+    return c.json(out, out.started ? 202 : 200);
+  } catch (e) {
+    return fail(c, e);
+  }
+});
 
 captureRoutes.get("/:slug/entrega", (c) => c.json({ entrega: entregaRead(c.req.param("slug")) }));
 captureRoutes.post("/:slug/entrega/encender", async (c) => {
@@ -88,6 +116,26 @@ captureRoutes.get("/:slug/probador/:key", async (c) => {
   try {
     const r = await withDb((db) => probadorRead(db, c.req.param("slug"), assertKey(c.req.param("key"))));
     return r ? c.json(r) : c.json({ error: "TASK_NOT_FOUND" }, 404);
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+// PLA-127: the images a delivery changes (an icons change shows on no page): the list, and each file before and after.
+captureRoutes.get("/:slug/probador/:key/imagenes", async (c) => {
+  try {
+    const r = await withDb((db) => imagenesRead(db, c.req.param("slug"), assertKey(c.req.param("key"))));
+    return c.json({ files: r?.files ?? [] });
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+captureRoutes.get("/:slug/probador/:key/imagen", async (c) => {
+  try {
+    const lado = c.req.query("lado") === "antes" ? "antes" : "despues";
+    const file = c.req.query("path") ?? "";
+    const r = await withDb((db) => imagenBytes(db, c.req.param("slug"), assertKey(c.req.param("key")), lado, file));
+    if (!r) return c.json({ error: "IMAGE_NOT_FOUND" }, 404);
+    return c.body(new Uint8Array(r.bytes), 200, { "Content-Type": r.mime, "Cache-Control": "private, max-age=60", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox" });
   } catch (e) {
     return fail(c, e);
   }

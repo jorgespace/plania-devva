@@ -4,6 +4,9 @@ import { spawn as nodeSpawn, execFile } from "node:child_process";
 import { createWriteStream, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
+import { processCommand } from "../lib/proc-command.js";
+import { killTree } from "../lib/proc-tree.js";
+import { runEnv } from "./run-env.js";
 
 export type ChildLike = {
   pid?: number;
@@ -21,47 +24,27 @@ export type SpawnOptions = {
 };
 
 export type SpawnFn = (command: string, args: string[], options: SpawnOptions) => ChildLike;
-// Signals the whole process group of pid (negative pid), so subagents and tools stop too.
+// Signals the whole process group of pid (negative pid), so subagents and tools stop too. PLA-I2-19 (audit B5): on
+// Windows, which has neither groups nor signals, the first signal ends the tree (taskkill /T /F): the run cannot save
+// its branch there the way SIGINT lets it on macOS and Linux.
 export type KillFn = (pid: number, signal: NodeJS.Signals) => void;
 
-export const defaultSpawn: SpawnFn = (command, args, options) => nodeSpawn(command, args, options);
+// windowsHide: a detached child on Windows has no console, so a console program it starts (claude, git) would open a
+// window of its own.
+export const defaultSpawn: SpawnFn = (command, args, options) => nodeSpawn(command, args, { ...options, windowsHide: true });
 
-export const defaultKill: KillFn = (pid, signal) => {
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    try {
-      process.kill(pid, signal);
-    } catch {
-      // already gone
-    }
-  }
-};
+export const defaultKill: KillFn = (pid, signal) => killTree(pid, signal);
 
 // True when pid is alive and its command line looks like claude (guards against a reused pid).
 export type ProbePid = (pid: number) => Promise<boolean>;
 
-export const defaultProbePid: ProbePid = (pid) =>
-  new Promise((resolve) => {
-    execFile("ps", ["-o", "command=", "-p", String(pid)], { timeout: 5_000 }, (err, stdout) => {
-      if (err) return resolve(false);
-      resolve(/\bclaude\b/.test(stdout));
-    });
-  });
+// PLA-I2-19: /proc on Linux, portable ps elsewhere (src/lib/proc-command.ts).
+export const defaultProbePid: ProbePid = async (pid) => /\bclaude\b/.test((await processCommand(pid)) ?? "");
 
-// The child env: the parent's, minus every ANTHROPIC_* key (a stray API key would bill the API,
-// not the plan), plus the few values the run needs.
-export function childEnv(base: NodeJS.ProcessEnv, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(base)) {
-    if (/^ANTHROPIC_/i.test(key)) continue;
-    if (value !== undefined) out[key] = value;
-  }
-  for (const [key, value] of Object.entries(extra)) {
-    if (/^ANTHROPIC_/i.test(key)) continue;
-    out[key] = value;
-  }
-  return out;
+// PLA-I2-13: the child env is an allow-list (src/runner/run-env.ts): system basics, Claude Code's own variables
+// untouched, the run's own values (extra) and the names the project asks for. Nothing of Plania's own.
+export function childEnv(base: NodeJS.ProcessEnv, extra: Record<string, string> = {}, names: readonly string[] = []): NodeJS.ProcessEnv {
+  return runEnv(base, { extra, names });
 }
 
 export type ExitInfo = { code: number | null; signal: NodeJS.Signals | null; timedOut: boolean; stoppedBy: string | null };
@@ -166,7 +149,7 @@ export const WRAPPER_PATH = fileURLToPath(new URL("./wrapper.mjs", import.meta.u
 export const exitPathOf = (logPath: string): string => `${logPath}.exit.json`;
 
 export type DetachedSpawn = (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; detached: true; stdio: "ignore" }) => { pid?: number; unref?: () => void; on?: (event: "error", fn: (err: Error) => void) => unknown };
-const defaultDetachedSpawn: DetachedSpawn = (command, args, options) => nodeSpawn(command, args, options);
+const defaultDetachedSpawn: DetachedSpawn = (command, args, options) => nodeSpawn(command, args, { ...options, windowsHide: true });
 
 const isAlive = (pid: number): boolean => {
   try {
@@ -281,10 +264,7 @@ export function attachDetached(input: { pid: number | null; logPath: string; tim
 }
 
 // True when pid is a wrapper for this run (guards against a reused pid after a reboot).
-export const isWrapperOf = (pid: number, runId: string): Promise<boolean> =>
-  new Promise((resolve) => {
-    execFile("ps", ["-o", "command=", "-p", String(pid)], { timeout: 5_000 }, (err, stdout) => {
-      if (err) return resolve(false);
-      resolve(stdout.includes("wrapper.mjs") && stdout.includes(runId));
-    });
-  });
+export const isWrapperOf = async (pid: number, runId: string): Promise<boolean> => {
+  const cmd = (await processCommand(pid)) ?? "";
+  return cmd.includes("wrapper.mjs") && cmd.includes(runId);
+};

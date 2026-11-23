@@ -129,7 +129,7 @@ test("I54-1 #1: Darle forma (the default) creates an idea owned by the PO, origi
   assert.match(out.key, /^[A-Z]+-IDEA\d+$/);
   const t = await taskOf(out.key);
   const owner = t.ownerAgent ? ((await store.get("agents", { id: t.ownerAgent }))?.slug ?? null) : null;
-  assert.deepEqual([t.kind, t.stage, t.status, t.origin, owner, t.title], ["idea", "idea", "Open", "jorge", "po-micasa", "Que el registro pida menos datos"]);
+  assert.deepEqual([t.kind, t.stage, t.status, t.origin, owner, t.title], ["idea", "idea", "Open", "owner", "po-micasa", "Que el registro pida menos datos"]);
   assert.match(t.scope, /Darle forma\): "Que el registro pida menos datos\nHoy son nueve campos\."/);
   assert.match(t.scope, /`Entendí: …`/);
   assert.match(t.scope, /Nunca crees tickets para Taller/);
@@ -143,7 +143,7 @@ test("I54-1 #1: Darle forma (the default) creates an idea owned by the PO, origi
   const prompt = (f.spawned[0] as unknown as { args: string[] }).args[1]!;
   assert.match(prompt, new RegExp(`Ticket: ${out.key}`));
   assert.match(prompt, /This is an idea, not a ticket/);
-  assert.match(prompt, /Why you woke: pedido de Jorge para darle forma/);
+  assert.match(prompt, /Why you woke: pedido del dueño para darle forma/);
   f.spawned[0]!.finish();
   await runner.waitForAllRuns();
 });
@@ -153,7 +153,7 @@ test("I54-1 #2: Hacerlo ya is the Ready ticket for the PO plus the wake; an old 
   assert.equal(out.mode, "ya");
   assert.ok(out.woke, "a wake was tried at once");
   const t = await taskOf(out.key);
-  assert.deepEqual([t.kind, t.status, t.origin, t.workType], ["ticket", "Ready", "jorge", "ops"]);
+  assert.deepEqual([t.kind, t.status, t.origin, t.workType], ["ticket", "Ready", "owner", "ops"]);
   const old = await ask({ text: "Revisa los textos", now: false });
   assert.deepEqual([old.mode, old.woke], ["ya", null]);
   assert.equal((await taskOf(old.key)).kind, "ticket");

@@ -9,10 +9,17 @@ import { inbox, type InboxItem } from "./inbox.js";
 import { listEvents } from "./queries.js";
 import { resumeDigest, resumeLine } from "./resume.js";
 import { iso, type Q } from "./tx.js";
+import { defineWords, say } from "../words.js";
 
-// 2.7 Watch API: cross-project reads for an assistant that keeps Jorge updated with one cheap call.
+// PLA-I2-10: a folded run of notes, in the install's language; the Spanish is unchanged.
+export const WATCH_WORDS = defineWords({
+  es: { notes: (key: string, n: number, agent: string, last: string) => `${key} ${n} notas (${agent}); última: ${last}` },
+  en: { notes: (key: string, n: number, agent: string, last: string) => `${key} ${n} notes (${agent}); last: ${last}` },
+});
+
+// 2.7 Watch API: cross-project reads for an assistant that keeps the owner updated with one cheap call.
 // list_projects (every project in one line with counts), get_running (every live claim with a
-// derived liveness) and get_digest (what changed since a cursor, what runs, what waits on Jorge).
+// derived liveness) and get_digest (what changed since a cursor, what runs, what waits on the owner).
 // Everything here reads tables other tools already write; agents emit nothing new.
 
 // A lease is "quiet" after this long without a heartbeat or an event from its session.
@@ -37,7 +44,7 @@ async function lastEventByProject(r: Reader, projectIds: string[]) {
   return out;
 }
 
-const ZERO_COUNTS = { open: 0, in_progress: 0, in_review: 0, needs_jorge: 0, blocked: 0, done: 0, overdue: 0 };
+const ZERO_COUNTS = { open: 0, in_progress: 0, in_review: 0, needs_owner: 0, blocked: 0, done: 0, overdue: 0 };
 
 // Statuses an open ticket and an overdue one are not in.
 const NOT_OPEN = ["Done", "Won't do", "Released"];
@@ -53,7 +60,7 @@ async function ticketCountsByProject(r: Reader) {
     if (!NOT_OPEN.includes(t.status)) c.open += 1;
     if (t.status === "In progress") c.in_progress += 1;
     if (t.status === "In review") c.in_review += 1;
-    if (t.status === "Needs Jorge") c.needs_jorge += 1;
+    if (t.status === "Needs owner") c.needs_owner += 1;
     if (t.status === "Blocked") c.blocked += 1;
     if (t.status === "Done") c.done += 1;
     if (t.dueOn !== null && t.dueOn < today && !NOT_OVERDUE.includes(t.status)) c.overdue += 1;
@@ -212,9 +219,10 @@ export function collapseChanges(evs: { id: number; at: string; type: string; tas
       out[out.length - 1] = { ...line, collapsed: (prev.collapsed ?? 1) + 1 };
       continue;
     }
-    if (sameKey && e.type === "note" && prev.summary.startsWith(`${e.task_key} nota (${e.actor.agent})`)) {
+    // PLA-I2-10: an event summary reads «nota» in Spanish and "note" in English (src/mcp/summary.ts).
+    if (sameKey && e.type === "note" && (prev.summary.startsWith(`${e.task_key} nota (${e.actor.agent})`) || prev.summary.startsWith(`${e.task_key} note (${e.actor.agent})`))) {
       const n = (prev.collapsed ?? 1) + 1;
-      out[out.length - 1] = { ...line, summary: `${e.task_key} ${n} notas (${e.actor.agent}); última: ${e.summary.slice(e.summary.indexOf(": ") + 2)}`, collapsed: n };
+      out[out.length - 1] = { ...line, summary: say(WATCH_WORDS).notes(e.task_key ?? "", n, e.actor.agent, e.summary.slice(e.summary.indexOf(": ") + 2)), collapsed: n };
       continue;
     }
     out.push(line);
@@ -253,7 +261,7 @@ async function latestCursor(r: Reader): Promise<number> {
 // remember: false reads from the reader's bookmark without moving it (the screen moves it on "Visto").
 export type DigestInput = { since?: number; project?: string; max_events_per_project?: number; reader?: string; remember?: boolean };
 
-type Highlights = { done: string[]; to_review: string[]; blocked: string[]; needs_jorge: string[]; prs_opened: number[]; prs_merged: number[]; claims: string[] };
+type Highlights = { done: string[]; to_review: string[]; blocked: string[]; needs_owner: string[]; prs_opened: number[]; prs_merged: number[]; claims: string[] };
 
 function highlight(h: Highlights, e: { type: string; task_key: string | null; payload: Record<string, unknown> }) {
   const k = e.task_key;
@@ -263,9 +271,9 @@ function highlight(h: Highlights, e: { type: string; task_key: string | null; pa
     if (to === "Done" || to === "Merged" || to === "Released") push(h.done, k);
     if (to === "In review") push(h.to_review, k);
     if (to === "Blocked") push(h.blocked, k);
-    if (to === "Needs Jorge") push(h.needs_jorge, k);
+    if (to === "Needs owner") push(h.needs_owner, k);
   }
-  if (e.type === "question.asked") push(h.needs_jorge, k);
+  if (e.type === "question.asked") push(h.needs_owner, k);
   if (e.type === "claim.acquired") push(h.claims, k);
   const n = typeof e.payload.number === "number" ? e.payload.number : null;
   if (e.type === "pr.opened" && n !== null && !h.prs_opened.includes(n)) h.prs_opened.push(n);
@@ -303,7 +311,7 @@ export async function getDigest(db: Q, input: DigestInput = {}) {
   }
 
   const [running, box, overdue] = await Promise.all([getRunning(db), inbox(db, "all"), overdueTasks(db, only ? scoped[0]?.id : undefined)]);
-  const needsJorge = (box.items as InboxItem[])
+  const needsOwner = (box.items as InboxItem[])
     .filter((i) => !only || i.project === only)
     .map((i) => ({ project: i.project, kind: i.kind, group: i.group, key: i.key, title: i.title, why: i.why, options: i.options, blocks: i.blocks, urgency: i.urgency, wait_s: i.wait_s, pr_url: i.pr_url, action_hint: i.action_hint }));
 
@@ -317,7 +325,7 @@ export async function getDigest(db: Q, input: DigestInput = {}) {
       continue;
     }
     const d = await resumeDigest(db, p);
-    const h: Highlights = { done: [], to_review: [], blocked: [], needs_jorge: [], prs_opened: [], prs_merged: [], claims: [] };
+    const h: Highlights = { done: [], to_review: [], blocked: [], needs_owner: [], prs_opened: [], prs_merged: [], claims: [] };
     for (const e of meaningful) highlight(h, e);
     const lines = collapseChanges(meaningful);
     out.push({
@@ -344,7 +352,7 @@ export async function getDigest(db: Q, input: DigestInput = {}) {
     since_from: from,
     as_of: running.as_of,
     truncated: feed.more,
-    needs_jorge: needsJorge,
+    needs_owner: needsOwner,
     overdue,
     running: running.running.filter((r) => !only || r.project === only),
     projects: out,

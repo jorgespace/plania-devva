@@ -1,0 +1,70 @@
+// PLA-I2-3: where an install keeps its projects, its run copies (worktrees) and its canvases. Asked at first start
+// with neutral defaults under the user's home; an environment variable always wins, so an install configured by
+// hand is unchanged.
+//   projects    PLANIA_PROJECTS_ROOT, else the first-start answer, else ~/plania/projects
+//   worktrees   PLANIA_WORKTREES_ROOT, else the first-start answer, else ~/plania/worktrees.noindex (or an existing
+//               ~/plania/worktrees)
+//   canvases    PLANIA_CANVASES_ROOT, else ~/plania/canvases
+// The first-start answers live in machine_state (key "folders"); loadFolders copies them into process.env at start,
+// the way src/install-state.ts does with the time zone, so every reader keeps reading the variable.
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import type { Q } from "./mcp/tx.js";
+import { writeVia } from "./runner/limits.js";
+import { readerOf } from "./store/port.js";
+
+export const FOLDERS_KEY = "folders";
+export type Folders = { projects: string; worktrees: string };
+
+/** The defaults: a "plania" folder in the user's home. */
+export function defaultFolders(home: string = homedir(), exists: (p: string) => boolean = existsSync): Folders & { canvases: string } {
+  const root = path.join(home, "plania");
+  return { projects: path.join(root, "projects"), worktrees: worktreesDefault(root, exists), canvases: path.join(root, "canvases") };
+}
+
+/** PLA-I73-1: on the guided-test Mac, Spotlight and the file-event service spent ~140 % CPU indexing run copies (a
+ * full set of node modules each). macOS skips any folder whose name ends in ".noindex", so a new install keeps its
+ * copies in worktrees.noindex. An install that already has ~/plania/worktrees keeps it: its copies, branches and
+ * footprints point there. */
+export function worktreesDefault(root: string, exists: (p: string) => boolean = existsSync, platform: NodeJS.Platform = process.platform): string {
+  const old = path.join(root, "worktrees");
+  return platform !== "darwin" || exists(old) ? old : path.join(root, "worktrees.noindex");
+}
+
+/** F5: the folders first start offers, written the way this machine writes paths: a variable set by hand wins,
+ * else the default under the home (on Windows C:\Users\<user>\plania\projects). */
+export function offeredFolders(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): Folders {
+  const d = defaultFolders(home);
+  return { projects: env.PLANIA_PROJECTS_ROOT?.trim() || d.projects, worktrees: env.PLANIA_WORKTREES_ROOT?.trim() || d.worktrees };
+}
+
+export const expandHome = (p: string, home: string = homedir()): string => p.replace(/^~(?=$|[\\/])/, home);
+
+/** A folder as the owner may type it: absolute, or starting with ~. */
+export function validFolder(raw: string | null | undefined): boolean {
+  const p = (raw ?? "").trim();
+  if (!p || p.length > 500 || /[\u0000-\u001f]/.test(p)) return false;
+  return p.startsWith("~") || path.isAbsolute(p);
+}
+
+/** Stores the first-start answers. Blank answers are left out (the default applies). */
+export async function saveFolders(db: Q, f: Partial<Folders>): Promise<void> {
+  const value: Partial<Folders> = {};
+  if (f.projects?.trim()) value.projects = f.projects.trim();
+  if (f.worktrees?.trim()) value.worktrees = f.worktrees.trim();
+  // Machine state belongs to no project; inside first start's write this is that write.
+  await writeVia(db, async (uow) => {
+    if (await uow.get("machineState", { key: FOLDERS_KEY })) await uow.update("machineState", { key: FOLDERS_KEY }, { value, updatedAt: uow.now });
+    else await uow.insert("machineState", { key: FOLDERS_KEY, value, updatedAt: uow.now });
+  });
+}
+
+/** Copies the stored answers into env where the variable is unset. Returns what was stored. */
+export async function loadFolders(db: Q, env: NodeJS.ProcessEnv = process.env): Promise<Partial<Folders>> {
+  const row = await readerOf(db).get("machineState", { key: FOLDERS_KEY });
+  const f = (row?.value ?? {}) as Partial<Folders>;
+  if (typeof f.projects === "string" && f.projects && !env.PLANIA_PROJECTS_ROOT?.trim()) env.PLANIA_PROJECTS_ROOT = f.projects;
+  if (typeof f.worktrees === "string" && f.worktrees && !env.PLANIA_WORKTREES_ROOT?.trim()) env.PLANIA_WORKTREES_ROOT = f.worktrees;
+  return f;
+}

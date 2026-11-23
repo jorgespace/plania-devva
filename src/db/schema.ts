@@ -36,7 +36,7 @@ export const projects = pgTable("projects", {
   version: integer("version").notNull().default(1),
   // Bumped when rules_text changes, so agents can tell they hold an old copy.
   rulesVersion: integer("rules_version").notNull().default(1),
-  // v2.1: the project's key prefix (FIL for filmia). Keys are PREFIX-I<n> (initiatives),
+  // v2.1: the project's key prefix (TND for tienda). Keys are PREFIX-I<n> (initiatives),
   // PREFIX-<n> (standalone tickets) and <initiative key>-<n> (phases); see src/mcp/keys.ts.
   keyPrefix: text("key_prefix").notNull().default(""),
   // v2.1: one human-readable line about where the project stands (set_project headline, ≤ 280 chars).
@@ -49,7 +49,7 @@ export const projects = pgTable("projects", {
   // v2.2: per-project settings as data: release_target (env), branch_pattern (regex), claim_from
   // (backlog|ready), resources and quotas policies, github and vercel integration config.
   settings: jsonb("settings").$type<ProjectSettings>().notNull().default({}),
-  // PLA-I29: the project kill switch. A new project starts paused; only Jorge resumes it, on screen.
+  // PLA-I29: the project kill switch. A new project starts paused; only the owner resumes it, on screen.
   runsPaused: boolean("runs_paused").notNull().default(true),
   runsPausedAt: timestamp("runs_paused_at", { withTimezone: true }),
   ...timestamps,
@@ -169,7 +169,7 @@ export const tasks = pgTable(
     status: text("status").notNull(),
     priority: text("priority"), // tickets only: P0|P1|P2|P3
     workType: text("work_type"), // tickets only: code|ops|research|decision-needed
-    origin: text("origin"), // tickets only: chartered|discovered|jorge (2.12: Jorge asked for it on screen)
+    origin: text("origin"), // tickets only: chartered|discovered|owner (2.12: the owner asked for it on screen)
     baseBranch: text("base_branch"), // initiatives only
     // Initiatives only: their part of the generated resume. Claims and next_claimable are derived.
     inProgressNote: text("in_progress_note").notNull().default(""),
@@ -185,6 +185,9 @@ export const tasks = pgTable(
     introducedBy: text("introduced_by"), // bugs: a key or a sha
     regression: boolean("regression"),
     costNote: text("cost_note"), // debt: what it costs while it stays
+    // PLA-I2-10 (0066): the words the owner typed for an order or an idea, kept as written. Null on agents' tickets
+    // and on orders made before 0066 (orderText falls back to their scope line).
+    ownerWords: text("owner_words"),
     // Bumped by every field change; appends (notes, results, checks) leave it alone.
     version: integer("version").notNull().default(1),
     // Lease: who is working on it and until when. An expired lease is free to claim and is cleared
@@ -287,7 +290,7 @@ export const docs = pgTable(
   ],
 );
 
-// v2: questions for Jorge. ask moves a ticket to Needs Jorge; the answer comes back as a decision
+// v2: questions for the owner. ask moves a ticket to Needs owner; the answer comes back as a decision
 // tied to the task, so another machine's session finds it instead of asking again.
 export const questions = pgTable(
   "questions",
@@ -308,7 +311,7 @@ export const questions = pgTable(
     answeredBy: jsonb("answered_by").$type<Actor>(),
     answeredAt: timestamp("answered_at", { withTimezone: true }),
     decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
-    // 2.8: other task keys this question holds up, and how soon Jorge is needed (now | soon | whenever).
+    // 2.8: other task keys this question holds up, and how soon the owner is needed (now | soon | whenever).
     blocks: text("blocks").array().notNull().default(sql`'{}'::text[]`),
     urgency: text("urgency"),
     humanOnly: boolean("human_only").notNull().default(false),
@@ -334,7 +337,7 @@ export const delegatedAnswers = pgTable(
     quote: text("quote").notNull(),
     actor: jsonb("actor").$type<Actor>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    // PLA-06: Jorge saw it on the Bandeja. The row stays; it leaves the list and the audit.
+    // PLA-06: the owner saw it on the Bandeja. The row stays; it leaves the list and the audit.
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
   },
   (t) => [
@@ -686,7 +689,7 @@ export const pollState = pgTable(
   (t) => [primaryKey({ columns: [t.projectId, t.source] })],
 );
 
-// 2.9: state of jobs that belong to the Mac, not to a project (the nightly backup), one row per key.
+// 2.9: state of jobs that belong to the machine, not to a project (the nightly backup), one row per key.
 export const machineState = pgTable("machine_state", {
   key: text("key").primaryKey(), // backup
   value: jsonb("value").$type<Record<string, unknown>>().notNull().default({}),
@@ -757,7 +760,7 @@ export type Actor = { agent: string; session_id: string; machine?: string; model
 export type Workspace = { machine?: string; worktree_path?: string; branch?: string };
 
 // A claim handed to another session (or anyone) with what is done and what is next.
-// footprint: what the ticket still has running on the Mac (register_footprint / the machine job), so the receiver knows.
+// footprint: what the ticket still has running on the machine (register_footprint / the machine job), so the receiver knows.
 export type Handoff = { to: string; note: string; head_sha?: string; from: Actor; at: string; until: string; footprint?: Record<string, unknown>[] };
 
 // Where an environment's deployed_at came from.
@@ -765,8 +768,24 @@ export type DeploySource = { provider: string; deployment_id: string; url?: stri
 
 // projects.settings (set_project settings, merged). Secrets never: integrations name env vars.
 // PLA-I60: the project's run limits, set in Motores. Missing keys are the defaults (1, 1, 1, true).
-export type ProjectRunnerSettings = { max_concurrent?: number; consulta_slots?: number; max_per_agent?: number; serialize_areas?: boolean };
+// PLA-58: shared_areas, the paths no single ticket owns (default src/runner/touched.ts DEFAULT_SHARED_AREAS).
+export type ProjectRunnerSettings = { max_concurrent?: number; consulta_slots?: number; max_per_agent?: number; serialize_areas?: boolean; shared_areas?: string[];
+  // PLA-I2-13: names of server variables this project's runs also get (src/runner/run-env.ts). Never Plania's own.
+  env?: string[] };
 
+// PLA-I73: how building goes fast (src/runner/velocidad.ts reads it with its defaults).
+export type VelocidadSettings = {
+  /** the next chained step starts when the previous one is delivered, on top of its branch */
+  apilar?: boolean;
+  /** por_modulo: a green step without risk is accepted by itself and the owner reviews the module at Publicar */
+  revision?: "por_paso" | "por_modulo";
+  /** Taller steps of this project at once (areas never overlap) */
+  carriles?: number;
+  /** the skeleton step starts when the plan is delivered, before «Constrúyelo» */
+  esqueleto_temprano?: boolean;
+  /** Plania runs settings.qa.verify on each delivery even without a QA seat */
+  verificar?: boolean;
+};
 export type ProjectSettings = {
   // PLA-I60: «Agentes a la vez», «Preguntas a la vez», «Por agente» (Motores) and same-files serialization.
   runner?: ProjectRunnerSettings;
@@ -777,19 +796,28 @@ export type ProjectSettings = {
   // PLA-I56-1: a released code, bug or debt ticket with every check closed and no open question moves to Done by
   // the rule. On unless false.
   auto_done?: boolean;
+  velocidad?: VelocidadSettings;
   branch_pattern?: string; // regex every branch name must match
   claim_from?: "backlog" | "ready"; // what get_next offers (default backlog)
   resources?: Record<string, { needs_approval?: boolean; ttl_max?: number }>; // by name glob
   quotas?: Record<string, { daily: number }>;
   github?: { repo: string; token_env?: string };
-  vercel?: { project_id: string; team_id?: string; token_env?: string; targets?: Record<string, string> };
-  // Where the project's repo lives on the Mac the machine job runs on (default <PLANIA_PROJECTS_ROOT>/<slug>).
-  local?: { repo_path?: string };
-  // 2.10: the release step only Jorge takes, e.g. {from: "sandbox", into: "main", env: "prod"}. Absent: none.
+  // PLA-I74-8: production_url is the address that must answer before a deploy counts as in production (default: the
+  // production environment's health or URL in Camino, else the deploy's own URL).
+  vercel?: { project_id: string; team_id?: string; token_env?: string; targets?: Record<string, string>; production_url?: string };
+  // Where the project's repo lives on the machine the machine job runs on (default <PLANIA_PROJECTS_ROOT>/<slug>).
+  // NEWPROJ-3: no_code says on purpose that the project has no code yet (never together with repo_path).
+  local?: { repo_path?: string; no_code?: boolean };
+  // PLA-I2-5: the branch every worktree is cut from and the only one Aceptar merges into. Default "sandbox"; never
+  // main, master, production or prod. Read it through startBranchOf (src/runner/start-branch.ts).
+  start_branch?: string;
+  // 2.10: the release step only the owner takes, e.g. {from: "sandbox", into: "main", env: "prod"}. Absent: none.
   release?: ReleaseSettings;
+  // PLA-I2-3: where the project sits in lists; lower first, then by slug. Colour and mark come from the slug.
+  identity?: { order?: number };
   // PLA-I21: how long since a check-in counts as idle. A live claim past this is stuck. Default 120.
   team?: { idle_minutes?: number };
-  // PLA-I36-6: the Ready ticket Jorge picked to go first (Cambiar lo siguiente); ignored once it leaves Ready.
+  // PLA-I36-6: the Ready ticket the owner picked to go first (Cambiar lo siguiente); ignored once it leaves Ready.
   next_first?: string;
   // PLA-I36-8: a PO's plan waits for "Sí, empiecen" before any ticket is made. On for a new project.
   plan_approval?: boolean;
@@ -806,11 +834,18 @@ export type ProjectSettings = {
   qa?: import("../runner/qa-settings.js").QaSettings;
   // PLA-I48-2: the floor's Máquinas: env file, migrate and seed commands, migrations folder (src/maquinas/settings.ts).
   maquinas?: import("../maquinas/env.js").MaquinasSettings;
+  // PLA-I66-6: the Marca door also counts the native app icons and the iPhone launch screens. Off unless set.
+  // PLA-I69-3: the extra surfaces the owner switched on (avisos, atajos, capturas, prueba).
+  marca?: { native?: boolean; extras?: Partial<Record<"avisos" | "atajos" | "capturas" | "prueba", boolean>> };
 };
 
-// 2.13: mode "command" (default) shows the command Jorge runs; "merge" lets him ship from the screen
+// 2.13: mode "command" (default) shows the command the owner runs; "merge" lets him ship from the screen
 // (a PR from → into merged with gh pr merge --merge, POST /api/projects/:slug/release/ship).
-export type ReleaseSettings = { from: string; into: string; env: string; mode?: "command" | "merge" };
+// PLA-I68-1: who migrates the production database when a release carries migrations: the deploy (its own step),
+// the owner by hand, or nobody (the project has no production database). Unset blocks a release with migrations.
+export const PROD_MIGRATIONS = ["deploy", "owner", "none"] as const;
+export type ProdMigrations = (typeof PROD_MIGRATIONS)[number];
+export type ReleaseSettings = { from: string; into: string; env: string; mode?: "command" | "merge"; prod_migrations?: ProdMigrations };
 
 export type Project = typeof projects.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
@@ -865,6 +900,14 @@ export const agents = pgTable(
     consultaEffort: text("consulta_effort"),
     // PLA-I60 (0060): this seat's own «a la vez» (null: the project's «por agente»).
     maxParallel: integer("max_parallel"),
+    // PLA-I67-2 (0068): «tu manera», the owner's instruction for this agent, appended after the role prompt.
+    manner: text("manner"),
+    mannerUpdatedAt: timestamp("manner_updated_at", { withTimezone: true }),
+    // PLA-I71-3 (0075): the owner paused this seat (it starts no run), its order on the chart, and the team template it
+    // was adopted from (PLA-I71-6).
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    position: integer("position"),
+    fromTeam: text("from_team"),
     ...timestamps,
   },
   (t) => [
@@ -915,11 +958,11 @@ export const goals = pgTable(
 export type Goal = typeof goals.$inferSelect;
 
 export const INITIATIVE_STATUSES = ["Planning", "Active", "Shipping", "Done", "On hold", "Won't do"] as const;
-export const TICKET_STATUSES = ["Backlog", "Ready", "In progress", "In review", "Merged", "Released", "Blocked", "Needs Jorge", "Done", "Won't do"] as const;
+export const TICKET_STATUSES = ["Backlog", "Ready", "In progress", "In review", "Merged", "Released", "Blocked", "Needs owner", "Done", "Won't do"] as const;
 export const IDEA_STATUSES = ["Open", "Done", "Won't do"] as const;
 export const PRIORITIES = ["P0", "P1", "P2", "P3"] as const;
-export const ORIGINS = ["chartered", "discovered", "jorge"] as const;
-// What an agent may pass to create_task; "jorge" is the screen's alone (POST /api/projects/:slug/tasks).
+export const ORIGINS = ["chartered", "discovered", "owner"] as const;
+// What an agent may pass to create_task; "owner" is the screen's alone (POST /api/projects/:slug/tasks).
 export const AGENT_ORIGINS = ["chartered", "discovered"] as const;
 export const KINDS = ["initiative", "ticket", "idea"] as const;
 
@@ -1029,7 +1072,7 @@ export const heartbeatRuns = pgTable(
 
 export type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 
-// PLA-I29: the autonomous runner. One settings row (company switch and the knobs only Jorge moves),
+// PLA-I29: the autonomous runner. One settings row (company switch and the knobs only the owner moves),
 // the run queue and live runs (PLA-21: no token budgets), the claude session per agent and project,
 // and plan-window readings. Migration 0039.
 export const runnerSettings = pgTable(
@@ -1115,13 +1158,23 @@ export const agentRuns = pgTable(
     stopRequested: text("stop_requested"),
     notBefore: timestamp("not_before", { withTimezone: true }),
     planWeight: real("plan_weight"),
+    // AUDIT-2 (migration 0061): what the run was given. prompt_version is "<doc version>:<first 12 of the sha256 of
+    // the role prompt>" (null on a resumed session or a run with no role prompt); skills are "<slug>@<first 8 of its
+    // sha256>" for every skill in the run's kit; skills_used are the slugs the stream showed the run invoking.
+    promptVersion: text("prompt_version"),
+    skills: text("skills").array().notNull().default(sql`'{}'::text[]`),
+    skillsUsed: text("skills_used").array().notNull().default(sql`'{}'::text[]`),
+    // AUDIT-7: the context the last turn carried (input + cache read + cache create of that turn), null when unknown.
+    contextTokens: bigint("context_tokens", { mode: "number" }),
+    // PLA-I67-2 (0068): the first 8 of the sha256 of the «tu manera» the run carried (null: none).
+    mannerVersion: text("manner_version"),
   },
   (t) => [
     index("agent_runs_status_idx").on(t.status, t.queuedAt),
     uniqueIndex("agent_runs_active_work_unique").on(t.agentId, t.projectId, t.workKey).where(sql`${t.status} in ('queued', 'starting', 'running')`),
     index("agent_runs_live_project_idx").on(t.projectId, t.lane).where(sql`${t.status} in ('starting', 'running')`),
     index("agent_runs_live_worker_idx").on(t.workerId).where(sql`${t.status} in ('starting', 'running')`),
-    check("agent_runs_trigger_check", sql`${t.trigger} in ('event', 'owner', 'cadence', 'consulta', 'retry', 'qa', 'brief')`),
+    check("agent_runs_trigger_check", sql`${t.trigger} in ('event', 'owner', 'cadence', 'consulta', 'retry', 'qa', 'brief', 'trial')`),
     check("agent_runs_lane_check", sql`${t.lane} in ('work', 'consulta')`),
     check("agent_runs_work_key_check", sql`char_length(${t.workKey}) between 1 and 200`),
     index("agent_runs_agent_idx").on(t.agentId, t.queuedAt),
@@ -1132,7 +1185,8 @@ export const agentRuns = pgTable(
 );
 
 export type AgentRun = typeof agentRuns.$inferSelect;
-export const RUN_TRIGGERS = ["event", "owner", "cadence", "consulta", "retry", "qa", "brief"] as const;
+// PLA-I67-6: trial is the owner's «Probar» of a skill on a past delivery (src/runner/trial.ts).
+export const RUN_TRIGGERS = ["event", "owner", "cadence", "consulta", "retry", "qa", "brief", "trial"] as const;
 export type RunTrigger = (typeof RUN_TRIGGERS)[number];
 export type RunLane = "work" | "consulta";
 
@@ -1214,8 +1268,8 @@ export const planReadings = pgTable(
 
 export type PlanReading = typeof planReadings.$inferSelect;
 
-// PLA-I32: conversations. One company thread (Jorge and Asistente) and one per project (Jorge and its PO;
-// the team answers there too). Messages link what they talk about and keep the action Jorge took.
+// PLA-I32: conversations. One company thread (the owner and Asistente) and one per project (the owner and its PO;
+// the team answers there too). Messages link what they talk about and keep the action the owner took.
 export const THREAD_KINDS = ["company", "project"] as const;
 export type ThreadKind = (typeof THREAD_KINDS)[number];
 export const LINK_KINDS = ["ticket", "doc", "pr", "idea", "question", "brief_plan"] as const;
@@ -1261,7 +1315,7 @@ export const threads = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     kind: text("kind").notNull(),
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
-    // When Jorge last read it on screen; later messages that are not his are unread.
+    // When the owner last read it on screen; later messages that are not his are unread.
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1350,7 +1404,7 @@ export const captureStills = pgTable(
 );
 export type CaptureStill = typeof captureStills.$inferSelect;
 
-// PLA-I54-2: pictures Jorge attaches to a request (pasted, dropped or picked on Pedir). Migration 0056. The file lives
+// PLA-I54-2: pictures the owner attaches to a request (pasted, dropped or picked on Pedir). Migration 0056. The file lives
 // in the local store under <captures dir>/pedidos/<project>/, named by its sha256 (src/pedidos/images.ts); Plania keeps
 // the row. The same picture twice on one request is one row; at most 6 per request (checked on upload).
 export const IMAGE_MIMES = ["image/png", "image/jpeg", "image/webp"] as const;
@@ -1431,7 +1485,10 @@ export type QaVerifyItem = {
   tail: string; // the last lines of output, for Taller's notes
 };
 export type QaCapture = { run_id: string | null; ok: number; failed: number; still_ids: string[]; error: string | null };
-export type QaReview = { verdict: "pass" | "fail"; notes: string; model: string | null };
+// AUDIT-6: verdict is the overall one (fail when either axis fails). spec is "does it meet the scope, the Done when
+// and the check list"; code is "is the change sound". Reviews stored before AUDIT-6 have neither.
+export type QaAxis = { verdict: "pass" | "fail"; notes: string };
+export type QaReview = { verdict: "pass" | "fail"; notes: string; model: string | null; spec?: QaAxis; code?: QaAxis; walked?: boolean };
 export type QaMark = { n: number; mark: "pass" | "fail"; note: string };
 export const QA_STATUSES = ["queued", "checking", "reviewing", "pass", "fail", "error"] as const;
 export type QaStatus = (typeof QA_STATUSES)[number];
@@ -1680,3 +1737,494 @@ export const consultas = pgTable(
   (t) => [index("consultas_project_idx").on(t.projectId, t.askedAt), check("consultas_text_check", sql`char_length(${t.text}) between 3 and 2000`)],
 );
 export type Consulta = typeof consultas.$inferSelect;
+
+// PLA-I2-14: the owner's display name, one row (id 1). Migration 0062. Null = the brief's owner_name, then
+// PLANIA_CEO_NAME, then «el dueño». Written at first start through setOwnerName (src/owner.ts).
+export const ownerProfile = pgTable(
+  "owner_profile",
+  {
+    id: integer("id").primaryKey().default(1),
+    displayName: text("display_name"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("owner_profile_singleton", sql`${t.id} = 1`), check("owner_profile_name_check", sql`${t.displayName} is null or char_length(${t.displayName}) between 1 and 80`)],
+);
+
+// PLA-I2-2: what the install command and the first-start screen made (migration 0063). One row, id 1.
+export const installState = pgTable(
+  "install_state",
+  {
+    id: integer("id").primaryKey().default(1),
+    setupCodeHash: text("setup_code_hash"),
+    setupCodeAt: timestamp("setup_code_at", { withTimezone: true }),
+    passwordHash: text("password_hash"),
+    runnerToken: text("runner_token"),
+    briefToken: text("brief_token"),
+    timeZone: text("time_zone"),
+    firstStartAt: timestamp("first_start_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("install_state_singleton", sql`${t.id} = 1`)],
+);
+
+// PLA-I67-2: skills the owner writes on screen and their immutable versions (migration 0068, ADR 0006).
+// src/runner/skills.ts resolves them with the factory kit; the newest version is what runs carry.
+export const SKILL_SCOPES = ["company", "seat", "project", "agent"] as const;
+export type SkillScope = (typeof SKILL_SCOPES)[number];
+export const skills = pgTable(
+  "skills",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    slug: text("slug").notNull(),
+    origin: text("origin").$type<"owner" | "factory-copy" | "imported">().notNull().default("owner"),
+    scope: text("scope").$type<SkillScope>().notNull().default("agent"),
+    role: text("role"),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    state: text("state").$type<"on" | "off" | "archived">().notNull().default("on"),
+    factorySha: text("factory_sha"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdBy: text("created_by").notNull().default("owner"),
+    // PLA-I67-6 (0073): an imported skill's link and the sha256 of the content the owner saw and saved.
+    sourceUrl: text("source_url"),
+    sourceHash: text("source_hash"),
+    sourceCheckedAt: timestamp("source_checked_at", { withTimezone: true }),
+    // PLA-I71-5 (0076): where a brought skill came from, the commit it was read at, its publisher, the files left out,
+    // what the review showed, and the newer content upstream has (null: none, or declined).
+    sourceKind: text("source_kind").$type<"link" | "github" | "skills.sh">(),
+    sourceCommit: text("source_commit"),
+    publisher: text("publisher"),
+    droppedFiles: text("dropped_files").array().notNull().default(sql`'{}'::text[]`),
+    review: jsonb("review").$type<SkillReview>(),
+    upstreamHash: text("upstream_hash"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("skills_slug_live_unique").on(t.slug).where(sql`${t.state} <> 'archived'`),
+    index("skills_agent_idx").on(t.agentId),
+    index("skills_project_idx").on(t.projectId),
+    check("skills_slug_check", sql`${t.slug} ~ '^[a-z][a-z0-9-]{0,39}$'`),
+    check("skills_origin_check", sql`${t.origin} in ('owner', 'factory-copy', 'imported')`),
+    check("skills_scope_check", sql`${t.scope} in ('company', 'seat', 'project', 'agent')`),
+    check("skills_state_check", sql`${t.state} in ('on', 'off', 'archived')`),
+  ],
+);
+export type OwnerSkillRow = typeof skills.$inferSelect;
+// PLA-I71-5: what the review showed before a brought skill was installed (src/runner/skill-import.ts).
+export type SkillMark = { file: string; line: number; kind: "secret" | "link"; text: string };
+export type SkillReview = { words: number; dropped: string[]; marks: SkillMark[]; pinned: string; dismissed?: string | null };
+
+export type SkillFile = { path: string; content: string };
+export const skillVersions = pgTable(
+  "skill_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    n: integer("n").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    body: text("body").notNull(),
+    files: jsonb("files").$type<SkillFile[]>().notNull().default([]),
+    hash: text("hash").notNull(),
+    author: text("author").notNull().default("owner"),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("skill_versions_skill_n_unique").on(t.skillId, t.n), check("skill_versions_n_check", sql`${t.n} >= 1`)],
+);
+export type SkillVersionRow = typeof skillVersions.$inferSelect;
+
+// PLA-I67-6 (0073): one past delivery re-run with one version of a skill, in a throwaway copy (src/runner/trial.ts).
+export type TrialStatus = "queued" | "running" | "done" | "failed" | "skipped" | "stopped";
+export const skillTrials = pgTable(
+  "skill_trials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    versionN: integer("version_n").notNull(),
+    versionStamp: text("version_stamp").notNull(),
+    taskKey: text("task_key").notNull(),
+    taskTitle: text("task_title").notNull().default(""),
+    beforeRunId: uuid("before_run_id").references(() => agentRuns.id, { onDelete: "set null" }),
+    baseCommit: text("base_commit"),
+    beforeStamp: text("before_stamp"),
+    beforeSkills: text("before_skills").array().notNull().default(sql`'{}'::text[]`),
+    beforeOutput: text("before_output"),
+    beforeDiff: text("before_diff"),
+    runId: uuid("run_id").references(() => agentRuns.id, { onDelete: "set null" }),
+    afterSkills: text("after_skills").array().notNull().default(sql`'{}'::text[]`),
+    afterOutput: text("after_output"),
+    afterDiff: text("after_diff"),
+    status: text("status").$type<TrialStatus>().notNull().default("queued"),
+    summary: text("summary").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("skill_trials_skill_idx").on(t.skillId, t.createdAt),
+    index("skill_trials_run_idx").on(t.runId),
+    check("skill_trials_status_check", sql`${t.status} in ('queued', 'running', 'done', 'failed', 'skipped', 'stopped')`),
+  ],
+);
+export type SkillTrialRow = typeof skillTrials.$inferSelect;
+
+// PLA-I67-3: the owner's corrections, the lessons they become, and what each run carried (migration 0069).
+// src/runner/lessons.ts reads corrections, runs the reflector and injects active lessons; only the owner approves.
+export type LessonState = "proposed" | "active" | "one-off" | "rejected" | "retired" | "expired";
+export type FeedbackKind = "changes" | "idea" | "dile";
+export const feedbackEvents = pgTable(
+  "feedback_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    taskKey: text("task_key"),
+    kind: text("kind").$type<FeedbackKind>().notNull(),
+    words: text("words").notNull(),
+    sourceEventId: bigint("source_event_id", { mode: "number" }),
+    runId: uuid("run_id"),
+    status: text("status").$type<"queued" | "reflecting" | "done" | "failed" | "skipped">().notNull().default("queued"),
+    verdict: jsonb("verdict").$type<Record<string, unknown>>(),
+    lessonId: uuid("lesson_id"),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("feedback_events_source_unique").on(t.sourceEventId).where(sql`${t.sourceEventId} is not null`), index("feedback_events_agent_idx").on(t.agentId, t.createdAt), index("feedback_events_status_idx").on(t.status, t.createdAt)],
+);
+export type FeedbackEvent = typeof feedbackEvents.$inferSelect;
+
+export const lessons = pgTable(
+  "lessons",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    scope: text("scope").$type<SkillScope>().notNull().default("agent"),
+    role: text("role"),
+    text: text("text").notNull(),
+    appliesWhen: text("applies_when"),
+    state: text("state").$type<LessonState>().notNull().default("proposed"),
+    proposedBy: text("proposed_by").$type<"reflector" | "owner">().notNull().default("reflector"),
+    feedbackId: uuid("feedback_id").references(() => feedbackEvents.id, { onDelete: "set null" }),
+    ownerWords: text("owner_words"),
+    taskKey: text("task_key"),
+    runId: uuid("run_id"),
+    conflictsWith: uuid("conflicts_with").references((): AnyPgColumn => lessons.id, { onDelete: "set null" }),
+    version: integer("version").notNull().default(1),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    lastConfirmedAt: timestamp("last_confirmed_at", { withTimezone: true }),
+    // PLA-I67-5 (0072): «mantener» on a 90-day retirement proposal, and the skill a lesson was merged into.
+    keptAt: timestamp("kept_at", { withTimezone: true }),
+    mergedInto: text("merged_into"),
+    ...timestamps,
+  },
+  (t) => [
+    index("lessons_agent_idx").on(t.agentId, t.state),
+    index("lessons_project_idx").on(t.projectId, t.state),
+    check("lessons_state_check", sql`${t.state} in ('proposed', 'active', 'one-off', 'rejected', 'retired', 'expired')`),
+    check("lessons_text_check", sql`char_length(${t.text}) between 3 and 600`),
+  ],
+);
+export type Lesson = typeof lessons.$inferSelect;
+
+export const lessonVersions = pgTable(
+  "lesson_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    lessonId: uuid("lesson_id")
+      .notNull()
+      .references(() => lessons.id, { onDelete: "cascade" }),
+    n: integer("n").notNull(),
+    text: text("text").notNull(),
+    appliesWhen: text("applies_when"),
+    author: text("author").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("lesson_versions_lesson_n_unique").on(t.lessonId, t.n)],
+);
+
+export const runKnowledge = pgTable(
+  "run_knowledge",
+  {
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"skill" | "lesson" | "manner" | "reference">().notNull(),
+    item: text("item").notNull(),
+    version: text("version").notNull(),
+    opened: boolean("opened").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.runId, t.kind, t.item] }), index("run_knowledge_item_idx").on(t.kind, t.item)],
+);
+
+// PLA-I67-5: each time a lesson's correction came back (migration 0072). A reflector suggestion counts once confirmed.
+export const lessonRepeats = pgTable(
+  "lesson_repeats",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    lessonId: uuid("lesson_id")
+      .notNull()
+      .references(() => lessons.id, { onDelete: "cascade" }),
+    feedbackId: uuid("feedback_id").references(() => feedbackEvents.id, { onDelete: "set null" }),
+    taskKey: text("task_key"),
+    words: text("words"),
+    by: text("by").$type<"owner" | "reflector">().notNull().default("owner"),
+    confirmed: boolean("confirmed").notNull().default(false),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("lesson_repeats_lesson_idx").on(t.lessonId, t.createdAt), uniqueIndex("lesson_repeats_feedback_unique").on(t.feedbackId).where(sql`${t.feedbackId} is not null`)],
+);
+
+// PLA-I67-4: references, the links, images and files the owner gives one agent (migration 0070). A file lives in the
+// local store under <captures dir>/references/<project>/ (src/references/store.ts); a link keeps the text snapshot the
+// server fetched at save time (src/lib/safe-fetch.ts). agent_reference_uses says which runs carried one and opened it.
+export const REFERENCE_KINDS = ["link", "image", "file"] as const;
+export type ReferenceKind = (typeof REFERENCE_KINDS)[number];
+export const REFERENCE_MIMES = ["image/png", "image/jpeg", "image/webp", "application/pdf"] as const;
+export type ReferenceMime = (typeof REFERENCE_MIMES)[number];
+export const agentReferences = pgTable(
+  "agent_references",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<ReferenceKind>().notNull(),
+    title: text("title").notNull(),
+    url: text("url"),
+    snapshotText: text("snapshot_text"),
+    snapshotAt: timestamp("snapshot_at", { withTimezone: true }),
+    fetchStatus: text("fetch_status").$type<"ok" | "failed">(),
+    fetchError: text("fetch_error"),
+    file: text("file"),
+    mime: text("mime").$type<ReferenceMime>(),
+    bytes: integer("bytes"),
+    width: integer("width"),
+    height: integer("height"),
+    originalBytes: integer("original_bytes"),
+    note: text("note").notNull().default(""),
+    stance: text("stance").$type<"follow" | "avoid">().notNull().default("follow"),
+    applies: text("applies").$type<"always" | "on_topic">().notNull().default("always"),
+    scope: text("scope").$type<"agent" | "project">().notNull().default("agent"),
+    state: text("state").$type<"on" | "off">().notNull().default("on"),
+    actor: jsonb("actor").$type<Actor>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("agent_references_agent_idx").on(t.agentId, t.createdAt),
+    index("agent_references_project_idx").on(t.projectId, t.scope),
+    check("agent_references_kind_check", sql`${t.kind} in ('link', 'image', 'file')`),
+    check("agent_references_stance_check", sql`${t.stance} in ('follow', 'avoid')`),
+    check("agent_references_applies_check", sql`${t.applies} in ('always', 'on_topic')`),
+    check("agent_references_scope_check", sql`${t.scope} in ('agent', 'project')`),
+    check("agent_references_state_check", sql`${t.state} in ('on', 'off')`),
+    check("agent_references_fetch_check", sql`${t.fetchStatus} is null or ${t.fetchStatus} in ('ok', 'failed')`),
+    check("agent_references_mime_check", sql`${t.mime} is null or ${t.mime} in ('image/png', 'image/jpeg', 'image/webp', 'application/pdf')`),
+    check("agent_references_bytes_check", sql`${t.bytes} is null or (${t.bytes} > 0 and ${t.bytes} <= 5242880)`),
+    check("agent_references_note_check", sql`char_length(${t.note}) <= 600`),
+    check("agent_references_title_check", sql`char_length(${t.title}) between 1 and 160`),
+  ],
+);
+export type AgentReference = typeof agentReferences.$inferSelect;
+
+export const agentReferenceUses = pgTable(
+  "agent_reference_uses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    referenceId: uuid("reference_id")
+      .notNull()
+      .references(() => agentReferences.id, { onDelete: "cascade" }),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    opened: boolean("opened").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("agent_reference_uses_run_ref_unique").on(t.runId, t.referenceId), index("agent_reference_uses_ref_idx").on(t.referenceId)],
+);
+
+// PLA-I66-1 (0067): a project's logo, versioned. The active row is the original the screen shows and every icon will
+// come from (src/brand/logos.ts). The file lives in the local capture store, never in a repo.
+export type LogoMime = "image/svg+xml" | "image/png";
+export type LogoVariant = "icon" | "mark"; // icon: drawn on its own background; mark: the bare drawing
+export type LogoSource = "repo" | "upload" | "artist";
+// keptOver: a repo logo the owner chose to keep this one over (the drift question, PLA-I66-4).
+export type LogoAdjust = { raw?: string; name?: string; scale?: number; bg?: string | null; keptOver?: string };
+export const projectLogos = pgTable(
+  "project_logos",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    file: text("file").notNull(), // <sha256>.<svg|png> in the store
+    mime: text("mime").$type<LogoMime>().notNull(),
+    bytes: integer("bytes").notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    variant: text("variant").$type<LogoVariant>().notNull(),
+    source: text("source").$type<LogoSource>().notNull(),
+    sourcePath: text("source_path"),
+    sourceCommit: text("source_commit"),
+    colors: text("colors").array().notNull().default(sql`'{}'::text[]`),
+    active: boolean("active").notNull().default(true),
+    // PLA-I66-3 (0071): the owner chose it (upload, a repo candidate, an Artist mark): the detector never replaces it.
+    chosen: boolean("chosen").notNull().default(false),
+    // PLA-I66-3: how an upload was fitted: its raw file in the store, the size inside the tile, the background.
+    adjust: jsonb("adjust").$type<LogoAdjust>(),
+    actor: jsonb("actor").$type<Actor>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("project_logos_version_unique").on(t.projectId, t.version),
+    uniqueIndex("project_logos_one_active").on(t.projectId).where(sql`${t.active}`),
+    check("project_logos_mime_check", sql`${t.mime} in ('image/svg+xml', 'image/png')`),
+    check("project_logos_variant_check", sql`${t.variant} in ('icon', 'mark')`),
+    check("project_logos_source_check", sql`${t.source} in ('repo', 'upload', 'artist')`),
+    check("project_logos_bytes_check", sql`${t.bytes} > 0 and ${t.bytes} <= 2097152`),
+  ],
+);
+export type ProjectLogo = typeof projectLogos.$inferSelect;
+
+// PLA-I68-2: Camino (drizzle/migrations/0074_camino.sql). config is CaminoConfig (src/camino/types.ts), never a secret;
+// discovery is the last read of GitHub and this machine.
+export const camino = pgTable("camino", {
+  projectId: uuid("project_id")
+    .primaryKey()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  config: jsonb("config").$type<import("../camino/types.js").CaminoConfig>().notNull().default(sql`'{}'::jsonb`),
+  version: integer("version").notNull().default(1),
+  discovery: jsonb("discovery").$type<import("../camino/types.js").Discovery>(),
+  checkedAt: timestamp("checked_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type CaminoDest = "plania" | "proveedor" | "github" | "pr" | "llavero";
+export const caminoHistory = pgTable(
+  "camino_history",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    who: text("who").notNull(),
+    label: text("label").notNull(),
+    dest: text("dest").$type<CaminoDest>().notNull(),
+    undo: text("undo"),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => [index("camino_history_project_at").on(t.projectId, t.at), check("camino_history_dest_check", sql`${t.dest} in ('plania', 'proveedor', 'github', 'pr', 'llavero')`)],
+);
+
+// PLA-I71-3 (0075): the role catalog as data (factory roles seeded from src/runner/team.ts, and the owner's own), and a
+// PO's proposal of a seat, which only the owner's screen decides.
+export const puestos = pgTable("puestos", {
+  slug: text("slug").primaryKey(),
+  title: text("title").notNull(),
+  line: text("line").notNull().default(""),
+  origin: text("origin").$type<"factory" | "owner">().notNull().default("owner"),
+  defaultSkills: text("default_skills").array().notNull().default(sql`'{}'::text[]`),
+  defaultMotor: jsonb("default_motor").$type<{ model: string | null; effort: string | null }>(),
+  promptRef: text("prompt_ref").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type PuestoRow = typeof puestos.$inferSelect;
+export const seatProposals = pgTable(
+  "seat_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    reason: text("reason").notNull(),
+    proposedBy: text("proposed_by").notNull(),
+    state: text("state").$type<"proposed" | "accepted" | "declined">().notNull().default("proposed"),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [index("seat_proposals_project_idx").on(t.projectId, t.state)],
+);
+export type SeatProposal = typeof seatProposals.$inferSelect;
+
+// PLA-I71-6 (0077): the team catalog (saved and brought teams; factory teams are kit/teams/*.json), adoptions, and
+// whole-company transfers (src/runner/teams.ts, src/runner/company-package.ts).
+export type TeamSeatSpec = { role: string; title?: string | null; line?: string | null; base?: string | null; reports_to: string | null; skills: string[]; motor?: { model: string | null; effort: string | null } | null; manner?: string | null };
+export type TeamSpec = { seats: TeamSeatSpec[]; skills?: { slug: string; name: string; description: string; body: string }[]; lessons?: { role: string; text: string }[]; references?: { role: string; title: string; url: string }[] };
+export const teamTemplates = pgTable("team_templates", {
+  slug: text("slug").primaryKey(),
+  name: text("name").notNull(),
+  line: text("line").notNull().default(""),
+  origin: text("origin").$type<"owner" | "imported">().notNull(),
+  spec: jsonb("spec").$type<TeamSpec>().notNull(),
+  source: text("source"),
+  sourceCommit: text("source_commit"),
+  hash: text("hash").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const teamAdoptions = pgTable("team_adoptions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  projectId: uuid("project_id")
+    .notNull()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  template: text("template").notNull(),
+  hash: text("hash").notNull(),
+  plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const companyTransfers = pgTable("company_transfers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  direction: text("direction").$type<"export" | "import">().notNull(),
+  state: text("state").$type<"previewed" | "done" | "failed">().notNull().default("done"),
+  manifest: jsonb("manifest").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+  counts: jsonb("counts").$type<Record<string, number>>().notNull().default(sql`'{}'::jsonb`),
+  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// PLA-I72-1 (0078): one row per initiative copy made on this machine (src/maquinas/copias.ts). The processes are
+// in memory; the row keeps the names (worktree, database), «No apagarla sola» and what the owner last asked.
+export const maquinaCopias = pgTable(
+  "maquina_copias",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    initiativeId: uuid("initiative_id").references(() => tasks.id, { onDelete: "set null" }),
+    initiativeKey: text("initiative_key").notNull(),
+    branch: text("branch").notNull(),
+    worktree: text("worktree"),
+    database: text("database"),
+    keep: boolean("keep").notNull().default(false),
+    state: text("state").$type<"on" | "off">().notNull().default("off"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => [index("maquina_copias_project_idx").on(t.projectId, t.deletedAt)],
+);
+export type MaquinaCopia = typeof maquinaCopias.$inferSelect;

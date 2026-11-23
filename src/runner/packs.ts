@@ -6,23 +6,40 @@
 // and removed when the run ends, so a role without the pack never sees its body. PACK_DIR ignores itself
 // (a `.gitignore` of `*`), and packGuard fails the run if a pack file still shows in the branch diff.
 // Nothing here is ever committed to an app repo.
+// AUDIT-2/3: a skill folder in this repo (kit/skills/<slug>, src/runner/kit.ts) is a pack too, and wins over a doc
+// with the same slug. A seat that lists no packs carries its role's default kit (kit/kits.json) unless
+// PLANIA_DEFAULT_KITS=0. By default the runner delivers packs as a plugin in the run's temp folder (kit.ts);
+// PLANIA_KIT_MODE=worktree keeps the older delivery below (PACK_DIR in the working folder).
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Db } from "../db/client.js";
 import type { Agent } from "../db/schema.js";
 import type { Q } from "../mcp/tx.js";
 import { readerOf } from "../store/port.js";
-import { writeVia } from "./limits.js";
+import { roleOf, writeVia } from "./limits.js";
 import { ALLOWED_BASE, defaultGit, type GitFn } from "./worktree.js";
+import { defaultSkills, repoSkills, sha } from "./kit.js";
+import { defineWords, say } from "../words.js";
+
+// PLA-I2-10: the API hint for a seat that is not on the team, in the install's language; the Spanish is unchanged.
+export const PACK_WORDS = defineWords({
+  es: { notOnTeam: (agent: string, project: string) => `${agent} no está en el equipo de ${project}` },
+  en: { notOnTeam: (agent: string, project: string) => `${agent} is not on ${project}'s team` },
+});
 
 export const PACK_TITLE_PREFIX = "Pack: ";
 export const PACK_DIR = ".plania-packs";
 export const MAX_PACKS = 10;
+// PLA-I67-1: an empty list means "the role's default kit". A seat whose owner turned every skill off stores this one
+// value instead, so it carries nothing. It is not a slug, so no pack can have it and no client can send it.
+export const NO_SKILLS = "-";
+const ownList = (skillPacks: string[] | null | undefined): string[] => (skillPacks ?? []).filter((s) => s !== NO_SKILLS);
 const SLUG = /^[a-z][a-z0-9-]{0,39}$/;
 const WHEN_LINE = /^\s*(?:\*\*)?(?:cu[aá]ndo|when)(?:\*\*)?\s*:\s*(?:\*\*)?\s*(.+?)\s*$/i;
 
-export type Pack = { slug: string; name: string; when: string; doc_id: string; markdown: string };
-export type PackRef = Omit<Pack, "markdown">;
+// source kit: a folder in this repo (dir set, doc_id null). source doc: a `Pack: <name>` doc in Plania.
+export type Pack = { slug: string; name: string; when: string; doc_id: string | null; markdown: string; source: "kit" | "doc"; dir: string | null; sha: string };
+export type PackRef = Omit<Pack, "markdown" | "dir">;
 
 const promptsProject = (env: NodeJS.ProcessEnv = process.env) => env.PLANIA_PROMPTS_PROJECT || "plania";
 
@@ -52,28 +69,35 @@ export async function listPacks(db: Db | Q, env: NodeJS.ProcessEnv = process.env
   const r = readerOf(db);
   const p = await r.get("projects", { slug: promptsProject(env) });
   const rows = p ? (await r.find("docs", { projectId: p.id, taskId: null }, { orderBy: [{ column: "title" }] })).filter((d) => d.title.startsWith(PACK_TITLE_PREFIX)) : [];
-  const out: Pack[] = [];
+  // The repo's skills first; a doc whose slug the repo already has is left out.
+  const out: Pack[] = repoSkills(env).map((k) => ({ slug: k.slug, name: k.name, when: k.when.slice(0, 240), doc_id: null, markdown: k.markdown, source: "kit" as const, dir: k.dir, sha: k.sha }));
+  const inRepo = new Set(out.map((k) => k.slug));
   for (const r of rows) {
     const name = r.title.slice(PACK_TITLE_PREFIX.length).trim();
     const slug = packSlug(name);
     const when = whenOf(r.markdown);
-    if (!name || !SLUG.test(slug) || !when) continue;
-    out.push({ slug, name, when, doc_id: r.id, markdown: r.markdown });
+    if (!name || !SLUG.test(slug) || !when || inRepo.has(slug)) continue;
+    out.push({ slug, name, when, doc_id: r.id, markdown: r.markdown, source: "doc", dir: null, sha: sha(r.markdown) });
   }
   return out;
 }
 
-export const packRef = ({ markdown: _m, ...ref }: Pack): PackRef => ref;
+export const packRef = ({ markdown: _m, dir: _d, ...ref }: Pack): PackRef => ref;
 
-// The packs one role carries, in the order stored; slugs whose doc is gone are skipped.
-export async function packsOf(db: Db | Q, agent: { skillPacks?: string[] | null }, env: NodeJS.ProcessEnv = process.env): Promise<Pack[]> {
-  const wanted = agent.skillPacks ?? [];
+// The packs one role carries, in the order stored; slugs whose doc is gone are skipped. With role given, a seat
+// that lists none carries that role's default kit (kit/kits.json).
+export async function packsOf(db: Db | Q, agent: { skillPacks?: string[] | null }, env: NodeJS.ProcessEnv = process.env, role?: string | null): Promise<Pack[]> {
+  if ((agent.skillPacks ?? []).includes(NO_SKILLS)) return [];
+  const own = ownList(agent.skillPacks);
+  const wanted = own.length === 0 && role && env.PLANIA_DEFAULT_KITS !== "0" ? defaultSkills(role, env) : own;
   if (wanted.length === 0) return [];
   const bySlug = new Map((await listPacks(db, env)).map((p) => [p.slug, p]));
   return wanted.map((s) => bySlug.get(s)).filter((p): p is Pack => !!p);
 }
 
-export type RolePacks = { project: string; agent: string; packs: PackRef[] };
+// PLA-I67-1: packs is what the seat's next run carries (its role's default kit when it lists none); own says whether
+// the seat has its own list (false: it follows the default kit).
+export type RolePacks = { project: string; agent: string; packs: PackRef[]; own: boolean };
 export type RolePacksError = { error: "PROJECT_NOT_FOUND" | "AGENT_NOT_FOUND" | "UNKNOWN_PACK" | "TOO_MANY_PACKS"; status: 400 | 404; hint: string; packs?: string[] };
 
 async function memberOf(db: Db | Q, project: string, agent: string): Promise<{ agent: Agent } | RolePacksError> {
@@ -81,18 +105,19 @@ async function memberOf(db: Db | Q, project: string, agent: string): Promise<{ a
   const p = await r.get("projects", { slug: project });
   if (!p) return { error: "PROJECT_NOT_FOUND", status: 404, hint: "no such project" };
   const a = await r.get("agents", { slug: agent, projectId: p.id });
-  if (!a || a.status === "retired") return { error: "AGENT_NOT_FOUND", status: 404, hint: `${agent} no está en el equipo de ${project}` };
+  if (!a || a.status === "retired") return { error: "AGENT_NOT_FOUND", status: 404, hint: say(PACK_WORDS).notOnTeam(agent, project) };
   return { agent: a };
 }
 
 export async function rolePacks(db: Db | Q, project: string, agent: string, env: NodeJS.ProcessEnv = process.env): Promise<RolePacks | RolePacksError> {
   const m = await memberOf(db, project, agent);
   if ("error" in m) return m;
-  return { project, agent, packs: (await packsOf(db, m.agent, env)).map(packRef) };
+  return { project, agent, packs: (await packsOf(db, m.agent, env, roleOf(m.agent))).map(packRef), own: (m.agent.skillPacks ?? []).length > 0 };
 }
 
-// Replaces the role's list (deduplicated, order kept). Every slug must name an existing pack.
-export async function setRolePacks(db: Db | Q, project: string, agent: string, slugs: string[], env: NodeJS.ProcessEnv = process.env): Promise<RolePacks | RolePacksError> {
+// Replaces the role's list (deduplicated, order kept). Every slug must name an existing pack. An empty list puts the
+// seat back on its role's default kit, unless opts.own: then the seat carries none (PLA-I67-1, La estantería).
+export async function setRolePacks(db: Db | Q, project: string, agent: string, slugs: string[], env: NodeJS.ProcessEnv = process.env, opts: { own?: boolean } = {}): Promise<RolePacks | RolePacksError> {
   const m = await memberOf(db, project, agent);
   if ("error" in m) return m;
   const list = [...new Set(slugs.map((s) => s.trim()))];
@@ -100,8 +125,9 @@ export async function setRolePacks(db: Db | Q, project: string, agent: string, s
   const known = new Set((await listPacks(db, env)).map((p) => p.slug));
   const unknown = list.filter((s) => !known.has(s));
   if (unknown.length) return { error: "UNKNOWN_PACK", status: 400, hint: `no pack doc for ${unknown.join(", ")}`, packs: unknown };
-  const [updated] = await writeVia(db, (uow) => uow.update("agents", { id: m.agent.id }, { skillPacks: list }), m.agent.projectId ?? undefined);
-  return { project, agent, packs: (await packsOf(db, updated!, env)).map(packRef) };
+  const stored = list.length === 0 && opts.own ? [NO_SKILLS] : list;
+  const [updated] = await writeVia(db, (uow) => uow.update("agents", { id: m.agent.id }, { skillPacks: stored }), m.agent.projectId ?? undefined);
+  return { project, agent, packs: (await packsOf(db, updated!, env, roleOf(updated!))).map(packRef), own: stored.length > 0 };
 }
 
 // ---- The run's working folder
@@ -113,7 +139,7 @@ export function clearPacks(cwd: string): void {
 }
 
 // Clears what an earlier run left, then writes this role's packs. Returns the relative file of each.
-export function writePacks(cwd: string, packs: Pack[]): { slug: string; name: string; when: string; file: string }[] {
+export function writePacks(cwd: string, packs: Pick<Pack, "slug" | "name" | "when" | "markdown">[]): { slug: string; name: string; when: string; file: string }[] {
   clearPacks(cwd);
   if (packs.length === 0) return [];
   const dir = path.join(cwd, PACK_DIR);
@@ -142,11 +168,12 @@ export const isPackPath = (p: string): boolean => {
 
 // The guard: pack files committed on the branch (against origin/sandbox) or staged in the worktree.
 // [] when the folder is not a git worktree or git cannot answer.
-export async function packsInDiff(cwd: string, git: GitFn = defaultGit): Promise<string[]> {
+// PLA-I2-5: base is the project's start branch (startBranchOf).
+export async function packsInDiff(cwd: string, git: GitFn = defaultGit, base: string = ALLOWED_BASE): Promise<string[]> {
   if (!existsSync(path.join(cwd, ".git"))) return [];
   const found = new Set<string>();
   for (const args of [
-    ["diff", "--name-only", `origin/${ALLOWED_BASE}...HEAD`],
+    ["diff", "--name-only", `origin/${base}...HEAD`],
     ["diff", "--name-only", "--cached"],
   ]) {
     const out = await git(args, cwd);

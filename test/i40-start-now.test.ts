@@ -3,7 +3,7 @@
 // Every process is a fake child; throwaway DB; nothing reaches a real claude or repo.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -29,6 +29,9 @@ let store: TestStore;
 let db: Db;
 let closeDb: () => Promise<void>;
 const scratch = mkdtempSync(path.join(tmpdir(), "plania-i40-start-"));
+// PLA-65: the seeded projects' checkouts live in the scratch folder, not in ~/Developer/Projects (absent on CI).
+const projectsDir = path.join(scratch, "projects");
+for (const slug of ["micasa", "workia", "filmia", "zigzag"]) mkdirSync(path.join(projectsDir, slug), { recursive: true });
 const A = { actor: { agent: "test-agent", session_id: "s-i40-start" } };
 const jorge = () => ({ Cookie: `${SESSION_COOKIE}=${createSession()}`, "Content-Type": "application/json" });
 
@@ -50,7 +53,7 @@ function fakes() {
   const spawned: { args: string[]; cwd: string; child: FakeChild }[] = [];
   let pid = 50_000;
   const deps = {
-    env: { HOME: scratch, PATH: "/usr/bin:/bin", PLANIA_RUNNER_TOKEN: "runner-token", PLANIA_PROMPTS_PROJECT: "micasa", CLAUDE_CODE_BIN: "/fake/bin/claude" } as NodeJS.ProcessEnv,
+    env: { HOME: scratch, PLANIA_PROJECTS_ROOT: projectsDir, PATH: "/usr/bin:/bin", PLANIA_RUNNER_TOKEN: "runner-token", PLANIA_PROMPTS_PROJECT: "micasa", CLAUDE_CODE_BIN: "/fake/bin/claude" } as NodeJS.ProcessEnv,
     logDir: path.join(scratch, "logs"),
     tmpDir: path.join(scratch, "tmp"),
     worktreeRoot: path.join(scratch, "worktrees"),
@@ -152,7 +155,7 @@ test("I40-2 #1: a queued run inside the rest starts on Que empiece ya, is logged
   assert.equal(f.spawned.length, 1);
   const forced = await store.find("events", { type: "wake.forced" });
   assert.equal(forced.length, 1);
-  assert.deepEqual([forced[0]!.payload.run_id, forced[0]!.payload.agent, forced[0]!.payload.past_guard, forced[0]!.taskKey, forced[0]!.actor.agent], [runId, "taller-micasa", false, first, "jorge"]);
+  assert.deepEqual([forced[0]!.payload.run_id, forced[0]!.payload.agent, forced[0]!.payload.past_guard, forced[0]!.taskKey, forced[0]!.actor.agent], [runId, "taller-micasa", false, first, "owner"]);
 
   f.spawned[0]!.child.finish();
   await runner.waitForRun(runId);
@@ -197,6 +200,32 @@ test("I40-2 #3: with Ready work and no queued run it queues and starts one run; 
   assert.deepEqual((await runs("taller-micasa")).filter((r) => r.status !== "ok").map((r) => [r.status, r.task_key]), [["running", key]]);
   assert.equal(f.spawned.length, 1);
   f.spawned[0]!.child.finish();
+});
+
+test("PLA-165: Que empiece ya starts the step the move names, and never a blocked, On hold or owner's step in its place", async () => {
+  const f = fakes();
+  // What the stray pick chose on a customer project: a step of an On hold initiative, owned by nobody, blocked, sorting first.
+  await writes.createTask(db, { project: "micasa", kind: "initiative", key: "AA-HOLD", title: "Plan de pagos", scope: "s" } as never, A);
+  const first = ((await writes.createTask(db, { project: "micasa", parent_key: "AA-HOLD", phase: 1, title: "Tabla", scope: "s", checks: ["c"], status: "Ready", priority: "P0" } as never, A)) as { key: string }).key;
+  const v = (await store.get("tasks", { key: "AA-HOLD" }))!.version;
+  await writes.setTask(db, { project: "micasa", key: "AA-HOLD", status: "On hold", version: v } as never, A);
+  const blocker = await ticket("Algo antes");
+  await writes.createTask(db, { project: "micasa", title: "Detrás de otro", scope: "s", checks: ["c"], status: "Ready", priority: "P0", blocked_by: [blocker] } as never, A);
+  await store.fix((uow) => uow.update("tasks", { key: blocker }, { status: "Backlog" }));
+  const mine = await ticket("Cómo llegar");
+  await rested(2);
+
+  const loaded = (await (await import("../src/jobs/heartbeat.js")).loadReady(db)).map((r: { key: string }) => r.key);
+  assert.ok(!loaded.includes(first), "a step of an On hold initiative is not ready work");
+  assert.ok(loaded.includes(mine));
+
+  const named = await go(f, { key: mine });
+  assert.deepEqual([named.started, named.ticket], [true, mine], "the named step starts");
+  f.spawned[0]!.child.finish();
+  await runner.waitForAllRuns();
+
+  const refused = await go(fakes(), { key: first });
+  assert.equal(refused.error, "NOT_READY", "a named step that is not startable is refused, not swapped for another");
 });
 
 test("I40-2 #4: with nothing Ready and nothing queued it says idle and starts nothing", async () => {

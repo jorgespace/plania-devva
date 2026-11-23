@@ -91,7 +91,7 @@ test("check 4: Sketch on a paused project waits, and wakes Artist once when runs
   assert.equal(a.body.status, "done", JSON.stringify(a.body));
   const sketch = (await store.get("tasks", { title: `Sketch: ${m1.title}` }))!;
   const t = { key: sketch.key, status: sketch.status, origin: sketch.origin, slug: (await store.get("agents", { id: sketch.ownerAgent! }))!.slug };
-  assert.deepEqual([t.status, t.origin, t.slug], ["Ready", "jorge", "artist-micasa"]);
+  assert.deepEqual([t.status, t.origin, t.slug], ["Ready", "owner", "artist-micasa"]);
   const ideaKey = a.body.line ? await ideaTask(m1.title) : null;
   assert.equal(ideaKey!.stage, "idea", "a sketch does not move the idea's stage");
   assert.equal((await runsOf("artist-micasa")).length, 0, "paused: no wake");

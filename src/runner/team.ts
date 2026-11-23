@@ -2,7 +2,7 @@
 // prompt doc in Plania (`Prompt: <role>`, PROMPT_DOCS) plus the roster fields an agent made from it gets.
 // The four core roles come with every project; the specialists are added on screen ("Añadir al equipo").
 // Agents of a team carry project_id and role_template; the slug is po-<project> for the product owner and
-// <template>-<project> for the rest (research-mianovia, taller-mianovia).
+// <template>-<project> for the rest (research-tienda, taller-tienda).
 import type { AdapterConfig, Agent } from "../db/schema.js";
 import type { Q } from "../mcp/tx.js";
 import { readerOf } from "../store/port.js";
@@ -48,7 +48,7 @@ export function untouchedAdapter(a: Agent): boolean {
 }
 
 // One team member: inserted when missing, otherwise given its project and template while those are
-// still empty (name, title, note and capabilities stay as Jorge left them). reports_to fills while empty.
+// still empty (name, title, note and capabilities stay as the owner left them). reports_to fills while empty.
 // tx may be the plain Db: the member is then one write of its own.
 export async function ensureMember(
   tx: Q,

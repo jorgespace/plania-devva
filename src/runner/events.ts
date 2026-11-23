@@ -6,7 +6,7 @@
 //   idea stage → research / → design          wakes Research / Artist, on the idea
 //   project resumed (runs_resumed)            wakes that project's PO (a new project's first wake)
 //   question asked by a PO (not human_only)   wakes Asistente, on that ticket (PLA-I32-5)
-//   thread.message from Jorge, company thread  wakes Asistente (PLA-I32-3); in a project thread the screen
+//   thread.message from the owner, company thread  wakes Asistente (PLA-I32-3); in a project thread the screen
 //                                             route makes a Ready PO ticket instead, which wakes the PO
 //   ticket → Merged, Released or Done          wakes Taller, on the first Ready ticket it was blocking (PLA-15)
 //   a runner run's lease expired (reaper)      wakes Taller (or the PO that owns it), on that ticket (PLA-16)
@@ -17,7 +17,9 @@
 // queued or running run gets nothing new. A company or project switch that is off enqueues nothing.
 // Off unless the heartbeat job runs (PLANIA_JOBS=1), so nothing waits in a queue nobody drains.
 import type { Actor, Agent, AgentRun, RunTrigger, Task } from "../db/schema.js";
-import { unsatisfiedBlockers } from "../mcp/blockers.js";
+import { LANDED, ST, isIn } from "../state/status.js";
+import { wakeOf } from "../state/transitions.js";
+import { workable, workableRule } from "../state/workable.js";
 import type { Q } from "../mcp/tx.js";
 import { readerOf } from "../store/port.js";
 import { notNull } from "../store/types.js";
@@ -25,15 +27,17 @@ import { loadSettings, roleOf, writeVia, type RunnerRole } from "./limits.js";
 import { insertRun, kickQueue } from "./queue.js";
 import { STAGE_REASON, stageOwner, type IdeaStage } from "./stages.js";
 import { isRunSession, runPrefixOf } from "./run-session.js";
+import { ownerEs } from "../owner.js";
+import { wakesOn } from "../install-state.js";
+import { buildReason } from "../api/company-pedido.js";
 
 export const EVENT_SUMMARY = "queued: event";
 const RUNNER_ADAPTER = "claude_code";
 const TALLER_WORK = new Set(["code", "bug", "debt", "ops"]);
-// PLA-15: the statuses where a ticket's work is in the integration branch (or needed no merge).
-const LANDED = new Set(["Merged", "Released", "Done"]);
 const PRIORITY = ["P0", "P1", "P2", "P3"];
 
-export const eventWakesEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => env.PLANIA_JOBS === "1" || env.PLANIA_EVENT_WAKES === "1";
+// PLA-I2-2: wakesOn is PLANIA_JOBS=1, or PLANIA_JOBS unset on an install made by the first-start screen.
+export const eventWakesEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => wakesOn(env) || env.PLANIA_EVENT_WAKES === "1";
 
 // A runner run writes as session run-<first 8 of its agent_runs id> (see userPrompt in runner.ts).
 export { isRunSession } from "./run-session.js";
@@ -86,6 +90,11 @@ export async function agentOfActor(tx: Q, actor: Actor | null | undefined): Prom
   return (await r.get("agents", { slug })) ?? null;
 }
 
+/** PLA-82 (F-12): the roster agent behind a write: its actor, else the run the runner named for the connection. */
+export async function agentOfCtx(tx: Q, ctx: { actor: Actor | null | undefined; runSession?: string }): Promise<Agent | null> {
+  return (await agentOfActor(tx, ctx.actor)) ?? (ctx.runSession ? agentOfActor(tx, { agent: "", session_id: ctx.runSession } as Actor) : null);
+}
+
 // PLA-I32-3: the chief of staff on the runner (role_template asistente, else the old rules).
 export async function asistenteAgent(tx: Q): Promise<Agent | null> {
   const rows = await runnerAgents(tx);
@@ -115,12 +124,11 @@ export async function freedBy(tx: Q, project: ProjectRef, landedId: string, tall
   const r = readerOf(tx);
   const waiting = (await r.find("taskBlockers", { blockerId: landedId })).map((b) => b.taskId);
   const rows = [];
-  for (const t of await r.find("tasks", { id: waiting, projectId: project.id, kind: "ticket", status: "Ready" })) {
-    if ((await unsatisfiedBlockers(tx, t)).length > 0) continue;
+  for (const t of await workable(r, await r.find("tasks", { id: waiting, projectId: project.id, kind: "ticket", status: ST.ready }))) {
     // Every other ticket it waits on has landed too.
     const others = (await r.find("taskBlockers", { taskId: t.id })).map((b) => b.blockerId).filter((id) => id !== landedId);
     const pending = await r.find("tasks", { id: others });
-    if (pending.some((b) => !LANDED.has(b.status))) continue;
+    if (pending.some((b) => !isIn(LANDED, b.status))) continue;
     rows.push(t);
   }
   const p = await r.get("projects", { id: project.id });
@@ -174,6 +182,30 @@ export async function enqueueWake(
   return { kind: "queued", runId: out.run.id, agent: agent.slug, role, taskKey: input.taskKey, reason: input.reason };
 }
 
+// PLA-164: the owner said «Constrúyelo» on this idea (the screen's pedido.construir event).
+async function builtByOwner(tx: Q, ideaId: string): Promise<boolean> {
+  return (await readerOf(tx).count("events", { taskId: ideaId, type: "pedido.construir" })) > 0;
+}
+// PLA-164: the initiative was built from an idea the owner said «Constrúyelo» to.
+async function initiativeBuiltByOwner(tx: Q, project: ProjectRef, initiativeKey: string): Promise<boolean> {
+  for (const idea of await readerOf(tx).find("tasks", { projectId: project.id, kind: "idea", promotedTo: initiativeKey })) {
+    if (await builtByOwner(tx, idea.id)) return true;
+  }
+  return false;
+}
+
+// PLA-151: the first Ready, unblocked step of an initiative that Taller may take (its own, or unowned Taller work;
+// never [PRUEBA]), by phase then key.
+async function firstStepFor(tx: Q, project: ProjectRef, initiativeId: string, taller: Agent | null): Promise<string | null> {
+  if (!taller) return null;
+  const r = readerOf(tx);
+  const rows = await workable(r, await r.find("tasks", { projectId: project.id, parentId: initiativeId }));
+  const mine = rows
+    .filter((t) => !t.title.includes("[PRUEBA]") && (t.ownerAgent ? t.ownerAgent === taller.id : !!t.workType && TALLER_WORK.has(t.workType)))
+    .sort((a, b) => (a.phase ?? Number.MAX_SAFE_INTEGER) - (b.phase ?? Number.MAX_SAFE_INTEGER) || a.key.localeCompare(b.key, "en", { numeric: true }));
+  return mine[0]?.key ?? null;
+}
+
 // What an emitted event should wake, if anything. Read-only; enqueueWake decides the rest.
 async function targetOf(
   tx: Q,
@@ -184,31 +216,68 @@ async function targetOf(
 ): Promise<{ agent: Agent | null; taskKey: string | null; reason: string } | null> {
   if (type === "project.runs_resumed") return { agent: await poOf(tx, project), taskKey: null, reason: "project resumed" };
   if (type === "thread.message") {
-    if (payload.thread_kind !== "company" || payload.author !== "jorge") return null;
-    return { agent: await asistenteAgent(tx), taskKey: null, reason: "message from Jorge" };
+    if (payload.thread_kind !== "company" || payload.author !== "owner") return null;
+    return { agent: await asistenteAgent(tx), taskKey: null, reason: "message from the owner" };
   }
   if (!task) return null;
+  const r = readerOf(tx);
+
+  // PLA-151 (guided test 3): after «Constrúyelo» the PO files the plan (step 1 born Ready, the rest chained) and then
+  // moves the initiative to Active. Nothing moved step 1, so nobody woke Taller and the board said «Nadie trabaja».
+  // The initiative turning Active wakes Taller on its first Ready, unblocked step Taller may take.
+  // PLA-I74-4: which wake a status move earns is the transitions table's (src/state/transitions.ts wakeOf).
+  const move = type === "task.status" && typeof payload.to === "string" ? wakeOf(payload.from as string | null, payload.to) : null;
+  if (move === "initiative-started") {
+    const taller = await serviceAgent(tx, "taller", project);
+    const first = await firstStepFor(tx, project, task.id, taller);
+    return first ? { agent: taller, taskKey: first, reason: `initiative ${task.key} started` } : null;
+  }
+
+  // PLA-164 (guided test 2026-11-22): after «Constrúyelo» the PO created the initiative, its step 1 born Ready, and set
+  // promoted_to, but left the initiative in Planning: PLA-151's Active rule never fired and the board asked the owner for
+  // «Que empiece ya». The idea's promoted_to landing after «Constrúyelo» is the start: Taller wakes on the first step.
+  if (type === "task.updated" && Array.isArray((payload.changes as Record<string, unknown> | undefined)?.promoted_to)) {
+    const to = ((payload.changes as Record<string, unknown>).promoted_to as unknown[])[1];
+    if (typeof to === "string" && to && (await builtByOwner(tx, task.id))) {
+      const ini = await r.get("tasks", { projectId: project.id, key: to });
+      if (ini && ini.status !== ST.onHold) {
+        const taller = await serviceAgent(tx, "taller", project);
+        const first = await firstStepFor(tx, project, ini.id, taller);
+        return first ? { agent: taller, taskKey: first, reason: `built from ${task.key}` } : null;
+      }
+    }
+    return null;
+  }
 
   // PLA-I30-6: a ticket a product owner owns wakes that PO when it is Ready, created that way included
-  // (Pedirle al PO creates it Ready). Taller still wakes on a move only.
+  // (Pedirle al PO creates it Ready). Taller wakes on a move, and on a standalone ticket created Ready and given to it (PLA-103).
   // PLA-16: a runner run's lease that ran out (the run ended without finishing or freeing its ticket) puts
   // the ticket back in Ready like a move. A person's or another client's expired lease wakes nobody.
   const runnerLeaseExpired =
-    type === "claim.expired" && payload.from === "In progress" && payload.to === "Ready" && isRunSession((payload.owner as Actor | null | undefined)?.session_id);
+    type === "claim.expired" && payload.from === ST.inProgress && wakeOf(String(payload.from), String(payload.to), "ticket") === "ready" && isRunSession((payload.owner as Actor | null | undefined)?.session_id);
   const readyNow =
-    (type === "task.status" && payload.to === "Ready" && payload.from !== "Ready") ||
-    (type === "task.created" && payload.kind === "ticket" && payload.status === "Ready") ||
+    move === "ready" ||
+    (type === "task.created" && payload.kind === "ticket" && typeof payload.status === "string" && wakeOf(null, payload.status, "ticket") === "ready") ||
     runnerLeaseExpired;
-  const r = readerOf(tx);
   if (readyNow) {
     const t = await r.get("tasks", { id: task.id });
     if (!t || t.kind !== "ticket" || t.title.includes("[PRUEBA]")) return null;
+    // Read against the write's own clock, as the blocker rule did inside the transaction.
+    const blocked = !(await workableRule(r, [t])).unblocked(t);
     if (t.ownerAgent) {
       const owner = await r.get("agents", { id: t.ownerAgent });
       if (owner && roleOf(owner) === "product-owner") return { agent: owner, taskKey: task.key, reason: "ticket ready" };
     }
-    if (type === "task.created") return null;
+    // PLA-103 (guided test PLA-86, F-29): a standalone ticket created Ready and given to Taller (the PO splits a «Hacerlo
+    // ya» into one) waited forever: Taller woke on a move only and the cadence never came; MIA-38 sat Ready 80 minutes.
+    // Only that case wakes on creation: plan steps (a parent), tickets behind a blocker and unassigned tickets still
+    // wait for their move.
     const taller = await serviceAgent(tx, "taller", project);
+    // PLA-151: a step created Ready, unblocked, under an initiative that is already Active wakes Taller too.
+    // PLA-164: or under one built from an idea the owner said «Constrúyelo» to (not On hold).
+    const parentRow = type === "task.created" && t.parentId && !blocked ? await r.get("tasks", { id: t.parentId }) : undefined;
+    const parentActive = !!parentRow && (parentRow.status === ST.active || (parentRow.status !== ST.onHold && (await initiativeBuiltByOwner(tx, project, parentRow.key))));
+    if (type === "task.created" && !parentActive && !(t.ownerAgent && t.ownerAgent === taller?.id && !t.parentId && !blocked)) return null;
     if (t.ownerAgent && t.ownerAgent !== taller?.id) return null;
     if (!t.ownerAgent && !(t.workType && TALLER_WORK.has(t.workType))) return null;
     // PLA-54: a chain step the server moved to Ready says which landing freed it.
@@ -216,7 +285,7 @@ async function targetOf(
     return { agent: taller, taskKey: task.key, reason: runnerLeaseExpired ? "lease expired" : (freed ?? "ticket ready") };
   }
   // PLA-15: a ticket lands once (In review → Merged; Merged → Released → Done after it is not a landing).
-  if (type === "task.status" && LANDED.has(String(payload.to)) && !LANDED.has(String(payload.from))) {
+  if (move === "landed") {
     const taller = await serviceAgent(tx, "taller", project);
     const next = await freedBy(tx, project, task.id, taller);
     return next ? { agent: taller, taskKey: next, reason: `unblocked by ${task.key}` } : null;
@@ -224,7 +293,7 @@ async function targetOf(
   if (type === "pr.ci_failed" || type === "pr.reviewed") {
     return { agent: await serviceAgent(tx, "taller", project), taskKey: task.key, reason: type === "pr.ci_failed" ? "ci red" : "pr review" };
   }
-  // PLA-I32-5: a PO's question goes to Asistente first; it answers what Plania already says, or leaves it to Jorge.
+  // PLA-I32-5: a PO's question goes to Asistente first; it answers what Plania already says, or leaves it to the owner.
   if (type === "question.asked") {
     const id = typeof payload.question_id === "string" ? payload.question_id : null;
     if (!id || payload.human_only === true) return null;
@@ -271,7 +340,7 @@ export async function onWriteEvent(
 ): Promise<EventWake | null> {
   if (!WATCHED.has(type) || !eventWakesEnabled(env)) return null;
   // PLA-I49-6: a project's runs coming back also wake the Artist or Research who own a Ready request of the owner's
-  // there (origin jorge: a sketch asked from the brief while the project was paused), once each. The PO wakes as before.
+  // there (origin owner: a sketch asked from the brief while the project was paused), once each. The PO wakes as before.
   if (type === "project.runs_resumed") await wakeReadyOwners(tx, project);
   const target = await targetOf(tx, project, type, task, payload);
   if (!target) return null;
@@ -280,7 +349,7 @@ export async function onWriteEvent(
 
 async function wakeReadyOwners(tx: Q, project: ProjectRef): Promise<void> {
   const r = readerOf(tx);
-  const rows = await r.find("tasks", { projectId: project.id, kind: "ticket", status: "Ready", origin: "jorge", ownerAgent: notNull() }, { orderBy: [{ column: "createdAt" }] });
+  const rows = await workable(r, await r.find("tasks", { projectId: project.id, origin: "owner", ownerAgent: notNull() }, { orderBy: [{ column: "createdAt" }] }));
   const seen = new Set<string>();
   for (const t of rows) {
     const agent = await r.get("agents", { id: t.ownerAgent! });
@@ -325,19 +394,16 @@ export async function queueWake(
 // nothing wakes that PO for it again. So when a PO's run ends well, one wake is queued for its oldest Ready
 // ticket that nothing holds. Never the ticket the run was on: an unfinished one would wake it in a loop.
 export async function wakePoIfWaiting(tx: Q, agent: Agent, project: ProjectRef, justRan: string | null, env: NodeJS.ProcessEnv = process.env): Promise<EventWake | null> {
-  if (!eventWakesEnabled(env) || roleOf(agent) !== "product-owner") return null;
+  if (!eventWakesEnabled(env)) return null;
+  if (roleOf(agent) === "taller") return wakeTallerIfWaiting(tx, agent, project, justRan);
+  if (roleOf(agent) !== "product-owner") return null;
   const r = readerOf(tx);
   const byAge = { orderBy: [{ column: "createdAt" as const }] };
-  // The oldest Ready ticket of this PO that nothing holds, other than the one it just ran.
-  let next: Task | null = null;
-  for (const t of await r.find("tasks", { projectId: project.id, kind: "ticket", status: "Ready", ownerAgent: agent.id }, byAge)) {
-    if (t.key === justRan || t.title.includes("[PRUEBA]")) continue;
-    if ((await unsatisfiedBlockers(tx, t)).length > 0) continue;
-    next = t;
-    break;
-  }
+  // The oldest workable ticket of this PO, other than the one it just ran (PLA-165, PLA-I74-4: the one workable rule).
+  const rows = await workable(r, await r.find("tasks", { projectId: project.id, ownerAgent: agent.id }, byAge));
+  const next = rows.find((t) => t.key !== justRan && !t.title.includes("[PRUEBA]"));
   if (next) return queueWake(tx, project, { id: next.id, key: next.key }, { agent, taskKey: next.key, reason: "request waiting" }, "run.ended");
-  const ideas = (await r.find("tasks", { projectId: project.id, kind: "idea", origin: "jorge", status: "Open", ownerAgent: agent.id, promotedTo: null }, byAge)).filter((t) => t.key !== (justRan ?? ""));
+  const ideas = (await r.find("tasks", { projectId: project.id, kind: "idea", origin: "owner", status: ST.open, ownerAgent: agent.id, promotedTo: null }, byAge)).filter((t) => t.key !== (justRan ?? ""));
   // PLA-I54-4: an owner's «Constrúyelo» whose wake was coalesced: the idea still waits for its promoted_to.
   let built: Task | null = null;
   for (const t of ideas) {
@@ -345,7 +411,7 @@ export async function wakePoIfWaiting(tx: Q, agent: Agent, project: ProjectRef, 
     built = t;
     break;
   }
-  if (built) return queueWake(tx, project, { id: built.id, key: built.key }, { agent, taskKey: built.key, reason: "Jorge dijo «Constrúyelo» en esta idea: termina los docs de las etapas que faltan, crea la iniciativa y sus tickets directamente, sin preguntar, y pon promoted_to en la idea" }, "run.ended");
+  if (built) return queueWake(tx, project, { id: built.id, key: built.key }, { agent, taskKey: built.key, reason: buildReason() }, "run.ended");
   // PLA-I54-1: an idea the owner asked to shape (Darle forma) whose wake was coalesced waits in the buzón: no run ever
   // took it. The PO takes the oldest one once nothing Ready waits.
   let idea: Task | null = null;
@@ -355,5 +421,23 @@ export async function wakePoIfWaiting(tx: Q, agent: Agent, project: ProjectRef, 
     break;
   }
   if (!idea) return null;
-  return queueWake(tx, project, { id: idea.id, key: idea.key }, { agent, taskKey: idea.key, reason: "pedido de Jorge para darle forma" }, "run.ended");
+  return queueWake(tx, project, { id: idea.id, key: idea.key }, { agent, taskKey: idea.key, reason: `pedido ${ownerEs("de")} para darle forma` }, "run.ended");
+}
+
+// PLA-104: a wake for Taller that arrived while it was busy (a ticket made Ready for it, «Hacer primero») was coalesced
+// and lost, so an idle Taller sat next to its own Ready tickets. When its run ends well it takes the oldest one it owns
+// that nothing blocks. Never the ticket the run was on (an unfinished one would loop), never a [PRUEBA] one.
+async function wakeTallerIfWaiting(tx: Q, agent: Agent, project: ProjectRef, justRan: string | null): Promise<EventWake | null> {
+  const r = readerOf(tx);
+  // PLA-165, PLA-I74-4: the one workable rule
+  const rows = await workable(r, await r.find("tasks", { projectId: project.id, ownerAgent: agent.id }, { orderBy: [{ column: "createdAt" }] }));
+  // As freedBy: the project's next_first («Hacer primero») first, then priority, then the oldest.
+  const p = await r.get("projects", { id: project.id });
+  const first = p?.settings.next_first;
+  const rank = (priority: string | null) => (PRIORITY.includes(priority ?? "") ? PRIORITY.indexOf(priority!) : PRIORITY.length);
+  const next = rows
+    .filter((t) => t.key !== justRan && !t.title.includes("[PRUEBA]"))
+    .sort((a, b) => Number(b.key === first) - Number(a.key === first) || rank(a.priority) - rank(b.priority))[0];
+  if (!next) return null;
+  return queueWake(tx, project, { id: next.id, key: next.key }, { agent, taskKey: next.key, reason: "ticket listo esperando" }, "run.ended");
 }

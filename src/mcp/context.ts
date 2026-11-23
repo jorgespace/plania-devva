@@ -1,7 +1,10 @@
+import { branchRoles } from "../camino/roles.js";
 import type { Project, Task, Workspace } from "../db/schema.js";
 import { readerOf } from "../store/port.js";
 import { listDecisions } from "./decisions.js";
 import { auditForKeys } from "./orden.js";
+import { planStepFor } from "./plan-step.js";
+import { stackBaseOf } from "../runner/stack.js";
 import { ToolError } from "./errors.js";
 import { footprintsOf, sessionFootprint } from "./footprint-read.js";
 import { listEvents, liveOwner, taskSummary } from "./queries.js";
@@ -12,7 +15,7 @@ import { iso, type Q } from "./tx.js";
 // get_context (R-03): one call for a session opening a worktree. From the branch (and machine /
 // worktree) it finds the initiative or tickets on it, the caller's live claims, the pinned decisions
 // that apply, unanswered questions on those tickets, and the events since the
-// cursor that touch them, plus the footprint on the Mac (src/mcp/footprint.ts) of those tickets and of the calling session. UNKNOWN_BRANCH when nothing is on that branch.
+// cursor that touch them, plus the footprint on the machine (src/mcp/footprint.ts) of those tickets and of the calling session. UNKNOWN_BRANCH when nothing is on that branch.
 
 export async function getContext(
   db: Q,
@@ -51,21 +54,40 @@ export async function getContext(
     ? (await r.find("questions", { projectId: p.id, answeredAt: null, taskId: [...ticketIds] })).map((q) => ({ q, key: ticketKey.get(q.taskId)! }))
     : [];
   const events = input.since_cursor !== undefined ? await listEvents(db, p.id, { since: input.since_cursor, limit: 500 }) : null;
-  // What is running on the Mac for these tickets (each row says which), and what this session registered.
+  // What is running on the machine for these tickets (each row says which), and what this session registered.
   const footprint = await footprintsOf(db, [...family]);
   const keyById = new Map([...tickets, ...(initiative ? [initiative] : [])].map((t) => [t.id, t.key]));
   const keys = new Set([...tickets.map((t) => t.key), ...(initiative ? [initiative.key] : [])]);
   const initiativeSummary = initiative ? await taskSummary(db, initiative) : null;
   const ticketSummaries = await Promise.all(tickets.map((t) => taskSummary(db, t)));
+  // PLA-I73-3: what the plan said about each step: its «Pruébalo» (and the views to deliver as the muestra), the
+  // steps it needs and the files it touches; and the delivered step it is stacked on (PLA-I73-2).
+  const planSteps = (
+    await Promise.all(
+      tickets.map(async (t) => {
+        const step = await planStepFor(db, t);
+        const under = await stackBaseOf(db, t.id);
+        if (!step && !under) return null;
+        return {
+          key: t.key,
+          ...(step ? { done_when: step.done_when, try_it: step.try_it, ...(step.muestra ? { muestra: step.muestra } : {}), ...(step.files ? { files: step.files } : {}), ...(step.esqueleto ? { esqueleto: true } : {}) } : {}),
+          ...(under ? { stacked_on: { key: under.key, branch: under.branch } } : {}),
+        };
+      }),
+    )
+  ).filter((x) => x !== null);
   return {
     project: p.slug,
     branch: branch ?? null,
+    // PLA-I68-3: the branch roles set in Camino: where work starts, where it collects, what is published.
+    branch_roles: await branchRoles(db, p),
     initiative: initiativeSummary,
     // PLA-I22: task → initiative → project goal → company goal, when the initiative has a goal.
     why_chain: initiativeSummary?.why_chain ?? ticketSummaries.find((t) => t.why_chain)?.why_chain ?? null,
-    // 2.12: what Jorge asked for on screen, newest first, whatever the branch.
+    // 2.12: what the owner asked for on screen, newest first, whatever the branch.
     requests: await openRequests(db, p.id),
     tickets: ticketSummaries,
+    ...(planSteps.length ? { plan_steps: planSteps } : {}),
     my_claims: await Promise.all(
       mine.map(async (t) => ({
         key: t.key,

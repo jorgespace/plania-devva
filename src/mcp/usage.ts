@@ -8,6 +8,7 @@ import { ToolError } from "./errors.js";
 import { findProject, requireTask } from "./queries.js";
 import { iso, writeTx, type Ctx } from "./tx.js";
 import { weekBounds, weekUsage } from "../runner/limits.js";
+import { screenTz } from "../locale.js";
 
 // PLA-I25: agents report how many tokens a task run used. Plania sums them per agent,
 // project and week and shows the word «reportado». The numbers are not a cap.
@@ -82,9 +83,6 @@ function parseAt(value: string | undefined): Date {
   return at;
 }
 
-function screenTz(): string {
-  return process.env.PLANIA_TZ || "America/Mexico_City";
-}
 
 // The ISO week (YYYY-Www) of an instant's date in a time zone, as Postgres' to_char(at at time zone tz, 'IYYY-"W"IW').
 function isoWeekOf(at: Date, tz: string): string {

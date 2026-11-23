@@ -4,7 +4,7 @@
 // app, Chrome, claude); throwaway store; nothing reaches a real repo or a real claude.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -14,6 +14,11 @@ import { resetTestStore, useTestEnv, type TestStore } from "./helpers.js";
 useTestEnv();
 process.env.PLANIA_EVENT_WAKES = "1";
 process.env.PLANIA_PROMPTS_PROJECT = "micasa";
+// PLA-I2-13: the rest of Plania's secrets (useTestEnv sets the database, MCP tokens, CI token and session secret)
+// and a Claude key: none may reach an app's command.
+process.env.GITHUB_TOKEN = "ghp-plania-secret";
+process.env.VAPID_PRIVATE_KEY = "vapid-plania-secret";
+process.env.ANTHROPIC_API_KEY = "sk-ant-not-for-apps";
 const { makeDb } = await import("../src/db/client.js");
 const { app } = await import("../src/app.js");
 const { createSession, SESSION_COOKIE } = await import("../src/auth/session.js");
@@ -123,6 +128,13 @@ const qaDeps = () => ({ exec, git, env: rf.deps.env, worktreeRoot: ROOT, startAp
 const pid = (slug: string) => store.projectId(slug);
 // The newest lane (two in the same millisecond: the one written last).
 const lane = async (key: string) => (await store.find("qaLanes", { taskKey: key }, { orderBy: [{ column: "createdAt" }] })).at(-1)!;
+// settings.velocidad of zigzag: merged in (settings || '{"velocidad": ...}'), or removed with null.
+const velocidad = (v: Record<string, unknown> | null) =>
+  store.fix(async (uow) => {
+    const p = (await uow.get("projects", { slug: "zigzag" }))!;
+    const { velocidad: _old, ...rest } = p.settings ?? {};
+    await uow.update("projects", { id: p.id }, { settings: (v ? { ...rest, velocidad: v } : rest) as typeof p.settings });
+  });
 const taskOf = async (key: string) => (await store.get("tasks", { projectId: await pid("zigzag"), key }))!;
 const ticket = async (key: string) => {
   const t = await taskOf(key);
@@ -275,7 +287,9 @@ test("I46-9 #1 #4: a code delivery gets tests, captures, a fresh review and chec
   // The verify commands ran in the delivery's checkout with the shell basics only (never Plania's env).
   assert.deepEqual(execCalls.map((c) => c.command), ["pnpm test", "pnpm typecheck"]);
   assert.equal(execCalls[0]!.cwd, worktreePathFor(ROOT, "zigzag", key));
-  assert.equal(execCalls[0]!.env!.DATABASE_URL, undefined);
+  // PLA-I2-13 #1: none of Plania's secrets, and no Claude sign-in, reach a QA command.
+  for (const k of ["DATABASE_URL", "MCP_BEARER_TOKEN", "MCP_READ_TOKEN", "SESSION_SECRET", "GITHUB_TOKEN", "VAPID_PRIVATE_KEY", "PLANIA_CI_TOKEN", "ANTHROPIC_API_KEY"]) assert.equal(execCalls[0]!.env![k], undefined, k);
+  assert.deepEqual(Object.keys(execCalls[0]!.env!).filter((k) => k.startsWith("PLANIA_")), []);
   assert.deepEqual([appStarts.at(-1)!.command, appStops], ["pnpm dev --port 4455", 1]);
   assert.equal(await card(key), null, "still QA's turn");
 
@@ -447,6 +461,8 @@ test("I46-9 #3: a usage hold stops the QA run like any other run; it starts once
 
 test("I46-9: without a QA teammate a delivery reaches the floor as before; the check list is editable from the screen", async () => {
   await store.fix((uow) => uow.update("agents", { slug: "qa-zz" }, { status: "retired" }));
+  // PLA-I73-2: with the verification lane off; on (the default) Plania runs the checks itself (below).
+  await velocidad({ verificar: false });
   try {
     const key = await newTicket("Sin QA");
     await deliver(key, SHA1, 15);
@@ -464,11 +480,70 @@ test("I46-9: without a QA teammate a delivery reaches the floor as before; the c
     const four = await app.request(`/api/projects/zigzag/qa/${key}/checklist`, { method: "PUT", headers: jorge(), body: JSON.stringify({ items: ["1", "2", "3", "4"] }) });
     assert.equal(four.status, 400);
     const written = await store.find("events", { type: "po_checks.set", taskKey: key }, { orderBy: [{ column: "id", desc: true }], limit: 1 });
-    assert.equal(written[0]!.actor.agent, "jorge");
+    assert.equal(written[0]!.actor.agent, "owner");
     const stored = (await taskOf(key)).poChecklist;
     assert.deepEqual(stored.map((c: Json) => [c.n, c.text, c.done]), [[1, "Uno", false], [2, "Dos", false]], "one storage: tasks.po_checklist");
   } finally {
     await store.fix((uow) => uow.update("agents", { slug: "qa-zz" }, { status: "idle" }));
+    await velocidad(null);
   }
   assert.ok(DENY_RULES.length > 0 && QA_DENY_RULES.includes("Edit"));
+});
+
+test("PLA-I73-2: without a QA teammate the verification lane still runs the project's checks and decides on them", async () => {
+  await store.fix((uow) => uow.update("agents", { slug: "qa-zz" }, { status: "retired" }));
+  try {
+    const key = await newTicket("Solo pruebas");
+    await deliver(key, SHA1, 15);
+    const verify = (await store.get("projects", { slug: "zigzag" }))!.settings.qa?.verify;
+    if (!Array.isArray(verify) || verify.length === 0) return; // this project has no checks to run
+    assert.ok((await qa.sweepQa(db, new Date(), qaDeps())).opened >= 1, "lanes open without a QA seat");
+    const opened = (await store.find("qaLanes", { taskKey: key }, { orderBy: [{ column: "createdAt", desc: true }], limit: 1 }))[0];
+    assert.ok(opened, "a lane was opened");
+  } finally {
+    await store.fix((uow) => uow.update("agents", { slug: "qa-zz" }, { status: "idle" }));
+  }
+});
+
+test("PLA-I74-9: a checkout with a build script gets the host's build as the last check; a failing build sends the delivery back; removed with a reason it does not run", async () => {
+  verifyOut = { "pnpm run build": { code: 1, out: "Type error: Property 'precio' does not exist on type 'Item'.\nError: Command \"next build\" exited with 1\n" } };
+  await store.fix(async (uow) => {
+    await uow.delete("agentRuns", {});
+    // The lanes the test before left open (one queued behind another's checks, one waiting on a review it never got)
+    // would run first: QA checks one delivery at a time. They end here, so this test's lane is the next one checked.
+    await uow.update("qaLanes", { status: ["queued", "checking", "reviewing"] }, { status: "error", endedAt: uow.now });
+  });
+  const key = await newTicket("Precio en la lista");
+  await deliver(key, SHA1, 21);
+  const dir = worktreePathFor(ROOT, "zigzag", key);
+  writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { build: "next build", test: "node --test" } }));
+  writeFileSync(path.join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  execCalls.length = 0;
+  await tick();
+  const l = await lane(key);
+  assert.deepEqual(l.verify.map((v: Json) => [v.name, v.command, v.ok]), [["test", "pnpm test", true], ["typecheck", "pnpm typecheck", true], ["build", "pnpm run build", false]]);
+  assert.ok(execCalls.some((c) => c.command === "pnpm run build" && c.cwd === dir), "run in the delivery's checkout");
+  assert.equal(l.status, "fail");
+  assert.equal((await ticket(key)).status, "Ready", "back to Taller");
+  const note = (await store.find("events", { taskKey: key, type: "note" }, { orderBy: [{ column: "id", desc: true }], limit: 1 }))[0]?.payload.text as string;
+  assert.match(note, /build falló[\s\S]*`pnpm run build`[\s\S]*Property 'precio' does not exist/);
+
+  // Removed with a reason: the list runs without it.
+  const p = await findProject(db, "zigzag");
+  await setProject(db, { project: "zigzag", version: p.version, settings: { qa: { ...p.settings.qa!, no_build: { reason: "La compila el servicio con otra versión de Node" } } } } as never, A);
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  const key2 = await newTicket("Precio sin construir");
+  await deliver(key2, SHA2, 22);
+  const dir2 = worktreePathFor(ROOT, "zigzag", key2);
+  writeFileSync(path.join(dir2, "package.json"), JSON.stringify({ scripts: { build: "next build" } }));
+  execCalls.length = 0;
+  await tick();
+  assert.ok(!execCalls.some((c) => c.command.includes("build")), "no build once removed");
+  assert.deepEqual((await lane(key2)).verify.map((v: Json) => v.name), ["test", "typecheck"]);
+  // A reason is required.
+  const bad = parseQaSettings({ verify: [], no_build: { reason: "" } });
+  assert.equal(bad.ok, false);
+  const p2 = await findProject(db, "zigzag");
+  const { no_build: _drop, ...rest } = p2.settings.qa!;
+  await setProject(db, { project: "zigzag", version: p2.version, settings: { qa: rest } } as never, A);
 });

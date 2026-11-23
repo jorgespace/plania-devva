@@ -1,7 +1,7 @@
 // PLA-I35-1: what a project card says about the business, derived from tables that already exist (no migration).
 //   plan       where the work is (PLA-I36-5: by the calendar, not by an initiative's place in the list).
 //   this_week  what happened in the last 7 days: tickets closed, docs written, PRs merged; last_at = last event.
-//   next       the next milestone and whose it is: Jorge's (a ceo-owned or Needs Jorge ticket) first, then the
+//   next       the next milestone and whose it is: the owner's (a ceo-owned or Needs owner ticket) first, then the
 //              next Ready ticket, the active initiative's before the rest.
 //   work       what a paused project keeps inside: open tickets, and those In progress.
 // PLA-I36-5. The plan is the project's open initiatives (Planning, Active, Shipping, On hold). Delivery is the
@@ -14,12 +14,11 @@ import type { Db } from "../db/client.js";
 import type { Project, Task } from "../db/schema.js";
 import { blockedTaskIds } from "../mcp/blockers.js";
 import { roleOf } from "../runner/limits.js";
+import { CLOSED, DONE_LIKE as DONE, OPEN_INITIATIVE, ST, isIn } from "../state/status.js";
 import { readerOf } from "../store/port.js";
-import { gte, notNull } from "../store/types.js";
+import { gte, notNull, type Reader } from "../store/types.js";
 
 const DAY = 86_400_000;
-const CLOSED = ["Done", "Merged", "Released", "Won't do"];
-const DONE = ["Done", "Merged", "Released"];
 
 export type Pace = "ok" | "late" | "bad";
 export type PlanLine = {
@@ -38,14 +37,13 @@ export type PlanLine = {
   forecast_on: string | null;
 };
 export type ThisWeek = { done: number; docs: number; prs: number; last_at: string | null };
-export type NextOwner = "jorge" | "po" | string;
+export type NextOwner = "owner" | "po" | string;
 export type NextLine = { title: string; key: string; owner: NextOwner; due: string | null };
 export type WorkLine = { open: number; in_progress: number };
 
 // MIA-I2 before MIA-I10: the number at the end of the key, then creation.
 const keyNumber = (key: string) => Number(/(\d+)$/.exec(key)?.[1] ?? Number.MAX_SAFE_INTEGER);
 export const byKey = (a: Task, b: Task) => keyNumber(a.key) - keyNumber(b.key) || a.createdAt.getTime() - b.createdAt.getTime();
-const OPEN_INITIATIVE = ["Planning", "Active", "Shipping", "On hold"];
 const day = (d: Date) => d.toISOString().slice(0, 10);
 const atNoon = (iso: string) => Date.parse(`${iso}T12:00:00Z`);
 
@@ -57,7 +55,9 @@ export function calendarOf(input: { startOn: string; dueOn: string; today: Date;
   const due = atNoon(input.dueOn);
   const span = Math.max(DAY, due - start);
   const weeks = Math.max(1, Math.ceil(span / (7 * DAY)));
-  const today = Math.min(1, Math.max(0, (input.today.getTime() - start) / span));
+  // PLA-99: today counts by day, at noon like start and delivery, so the mark does not move with the hour (it read
+  // 51 % at 18:53 and 50 % at noon for the same plan, and i36-phase2 failed by the clock).
+  const today = Math.min(1, Math.max(0, (atNoon(day(input.today)) - start) / span));
   const done = input.total > 0 ? input.done / input.total : 0;
   const behind = Math.max(0, Math.round((today - done) * weeks));
   const pct = (x: number) => Math.round(x * 100);
@@ -76,18 +76,18 @@ export const forecastOf = (dueOn: string, weeksBehind: number) => day(new Date(a
 
 export async function planOf(db: Db, p: Project, today = new Date(), goalTarget: string | null = null): Promise<PlanLine | null> {
   const r = readerOf(db);
-  const open = (await r.find("tasks", { projectId: p.id, kind: "initiative" })).filter((t) => OPEN_INITIATIVE.includes(t.status)).sort(byKey);
-  const active = open.filter((t) => t.status === "Active").at(-1);
+  const open = (await r.find("tasks", { projectId: p.id, kind: "initiative" })).filter((t) => isIn(OPEN_INITIATIVE, t.status)).sort(byKey);
+  const active = open.filter((t) => t.status === ST.active).at(-1);
   if (!active) return null;
   const tickets = await r.find("tasks", { parentId: open.map((t) => t.id), kind: "ticket" });
-  const counted = tickets.filter((c) => c.status !== "Won't do");
+  const counted = tickets.filter((c) => c.status !== ST.wontDo);
   const mine = counted.filter((c) => c.parentId === active.id);
   const dueOn = goalTarget ?? open.map((t) => t.dueOn).filter((d): d is string => !!d).sort().at(-1) ?? null;
   const startOn = day(new Date(Math.min(...open.map((t) => t.createdAt.getTime()))));
-  const cal = dueOn ? calendarOf({ startOn, dueOn, today, done: counted.filter((c) => DONE.includes(c.status)).length, total: counted.length }) : null;
+  const cal = dueOn ? calendarOf({ startOn, dueOn, today, done: counted.filter((c) => isIn(DONE, c.status)).length, total: counted.length }) : null;
   return {
     initiative: { key: active.key, title: active.title },
-    done: mine.filter((c) => DONE.includes(c.status)).length,
+    done: mine.filter((c) => isIn(DONE, c.status)).length,
     total: mine.length,
     start_on: dueOn ? startOn : null,
     due_on: dueOn,
@@ -123,16 +123,16 @@ const MAX_STEPS = 12;
 
 export async function routeOf(db: Db, p: Project): Promise<Route | null> {
   const r = readerOf(db);
-  const open = (await r.find("tasks", { projectId: p.id, kind: "initiative" })).filter((t) => OPEN_INITIATIVE.includes(t.status)).sort(byKey);
+  const open = (await r.find("tasks", { projectId: p.id, kind: "initiative" })).filter((t) => isIn(OPEN_INITIATIVE, t.status)).sort(byKey);
   if (open.length === 0) return null;
-  const here = open.filter((t) => t.status === "Active").at(-1) ?? null;
-  const tickets = (await r.find("tasks", { parentId: open.map((t) => t.id), kind: "ticket" })).filter((t) => t.status !== "Won't do");
+  const here = open.filter((t) => t.status === ST.active).at(-1) ?? null;
+  const tickets = (await r.find("tasks", { parentId: open.map((t) => t.id), kind: "ticket" })).filter((t) => t.status !== ST.wontDo);
 
   const legs: RouteLeg[] = open.map((i) => {
     const mine = tickets.filter((t) => t.parentId === i.id);
-    const done = mine.filter((t) => DONE.includes(t.status)).length;
-    const left = mine.filter((t) => !DONE.includes(t.status));
-    const off = left.length > 0 && left.every((t) => t.status === "Backlog");
+    const done = mine.filter((t) => isIn(DONE, t.status)).length;
+    const left = mine.filter((t) => !isIn(DONE, t.status));
+    const off = left.length > 0 && left.every((t) => t.status === ST.backlog);
     const state: LegState = i.id === here?.id ? "here" : mine.length === 0 ? "unplanned" : done === mine.length ? "done" : "planned";
     return { key: i.key, title: i.title, done, total: mine.length, state, note: off ? (left.length === 1 ? `Pospuesto: ${left[0]!.title}` : `${left.length} pasos pospuestos`) : null, postponed: off };
   });
@@ -144,16 +144,15 @@ export async function routeOf(db: Db, p: Project): Promise<Route | null> {
       for (const k of (e.payload.tickets as unknown[] | undefined) ?? []) if (typeof k === "string") shipped.add(k);
     }
     // A Ready step is free when nothing holds it and every step before it has landed (the rule that wakes Taller).
-    const ready = mine.filter((t) => t.status === "Ready");
-    const LANDED = ["Merged", "Released", "Done"];
+    const ready = mine.filter((t) => t.status === ST.ready);
     // The ticket links of the Ready steps, with each blocking ticket: a step In review has not landed yet.
     const links = ready.length ? await r.find("taskBlockers", { taskId: ready.map((t) => t.id) }) : [];
     const blocking = new Map(links.length ? (await r.find("tasks", { id: [...new Set(links.map((l) => l.blockerId))] })).map((b) => [b.id, b]) : []);
-    const unlanded = links.map((l) => ({ taskId: l.taskId, b: blocking.get(l.blockerId) })).filter((x): x is { taskId: string; b: Task } => !!x.b && !LANDED.includes(x.b.status));
+    const unlanded = links.map((l) => ({ taskId: l.taskId, b: blocking.get(l.blockerId) })).filter((x): x is { taskId: string; b: Task } => !!x.b && !isIn(DONE, x.b.status));
     const held = ready.length ? await blockedTaskIds(r, p.id, ready.map((t) => t.id), new Date()) : new Set<string>();
     for (const x of unlanded) held.add(x.taskId);
-    // The first unlanded blocker of each held step: by phase (none last), then key.
     const waits = new Map<string, string>();
+    // The first unlanded blocker of each held step: by phase (none last), then key.
     const byPhase = [...unlanded].sort((a, b) => (a.b.phase ?? Infinity) - (b.b.phase ?? Infinity) || (a.b.key < b.b.key ? -1 : a.b.key > b.b.key ? 1 : 0));
     for (const x of byPhase) if (held.has(x.taskId) && !waits.has(x.taskId)) waits.set(x.taskId, x.b.title);
     const next = ready.find((t) => !held.has(t.id))?.id ?? null;
@@ -162,20 +161,20 @@ export async function routeOf(db: Db, p: Project): Promise<Route | null> {
     if (owners.length) for (const a of await r.find("agents", { id: owners })) roles.set(a.id, roleOf(a) ?? a.role);
     const steps: RouteStep[] = mine.map((t) => {
       const state: StepState =
-        t.status === "Released" || (DONE.includes(t.status) && shipped.has(t.key))
+        t.status === ST.released || (isIn(DONE, t.status) && shipped.has(t.key))
           ? "published"
-          : DONE.includes(t.status)
+          : isIn(DONE, t.status)
             ? "done"
-            : t.status === "In review"
+            : t.status === ST.inReview
               ? "delivered"
-              : t.status === "In progress"
+              : t.status === ST.inProgress
                 ? "working"
                 : t.id === next
                   ? "next"
                   : "later";
       const who = (t.ownerAgent && roles.get(t.ownerAgent)) || ((t.workType ?? "code") === "code" ? "taller" : "product-owner");
       const step: RouteStep = { key: t.key, title: t.title, state, who, at: t.statusChangedAt?.toISOString() ?? null };
-      if (state === "later" && t.status === "Backlog") step.postponed = true;
+      if (state === "later" && t.status === ST.backlog) step.postponed = true;
       const w = waits.get(t.id);
       if (state === "later" && w) step.waits = w;
       return step;
@@ -194,9 +193,7 @@ export async function thisWeekOf(db: Db, p: Project, now = new Date()): Promise<
   const r = readerOf(db);
   const since = new Date(now.getTime() - 7 * DAY);
   // Tickets that reached Done, Merged or Released this week, each counted once.
-  const closing = (await r.find("events", { projectId: p.id, type: "task.status", createdAt: gte(since) })).filter(
-    (e) => e.taskId !== null && DONE.includes(jsonText(e.payload.to) ?? ""),
-  );
+  const closing = (await r.find("events", { projectId: p.id, type: "task.status", createdAt: gte(since) })).filter((e) => e.taskId !== null && isIn(DONE, jsonText(e.payload.to)));
   const closedIds = [...new Set(closing.map((e) => e.taskId!))];
   const done = closedIds.length ? (await r.find("tasks", { id: closedIds })).filter((t) => t.kind === "ticket").length : 0;
   // Ticket docs written this week, each doc once.
@@ -213,9 +210,9 @@ export async function ceoAgentId(db: Db): Promise<string | null> {
 
 const PRIORITY = (p: string | null) => (p ? Number(p.slice(1)) : 9);
 
-// PLA-I36-6: the next Ready tickets (not Jorge's), in Siguiente's order, for Cambiar lo siguiente.
+// PLA-I36-6: the next Ready tickets (not the owner's), in Siguiente's order, for Cambiar lo siguiente.
 export type ReadyLine = { key: string; title: string };
-// PLA-I39-1: every Ready ticket that is not Jorge's, in Siguiente's order, with what decides whose queue it joins.
+// PLA-I39-1: every Ready ticket that is not the owner's, in Siguiente's order, with what decides whose queue it joins.
 export type QueuedTicket = { key: string; title: string; owner: string | null; work_type: string };
 
 export async function nextOf(db: Db, p: Project, ceoId: string | null, activeKey: string | null): Promise<NextLine | null> {
@@ -223,23 +220,30 @@ export async function nextOf(db: Db, p: Project, ceoId: string | null, activeKey
 }
 
 export async function readyOf(db: Db, p: Project, ceoId: string | null, activeKey: string | null): Promise<{ next: NextLine | null; ready: ReadyLine[]; queued: QueuedTicket[] }> {
+  // PLA-I74-4: the queues are the queueable steps (src/state/workable.ts: Ready, not under an On hold initiative
+  // (PLA-163), no person's own step; a step still behind a blocker stays so its card says «Espera a un paso»). The
+  // owner's own items (Needs owner, or a Ready step a person owns) lead Siguiente, never under an On hold initiative.
+  // Both are tickets that are Ready or Needs owner and not under an On hold initiative; personal tells them apart.
   const r = readerOf(db);
-  const open = await r.find("tasks", { projectId: p.id, kind: "ticket", status: ["Ready", "Needs Jorge"] }, { orderBy: [{ column: "phase" }, { column: "createdAt" }] });
+  const candidates = await r.find("tasks", { projectId: p.id, kind: "ticket", status: [ST.ready, ST.needsOwner] }, { orderBy: [{ column: "phase" }, { column: "createdAt" }] });
+  const { onHold, people } = await workableFacts(r, candidates);
+  const open = candidates.filter((t) => !(t.parentId && onHold.has(t.parentId)));
   if (open.length === 0) return { next: null, ready: [], queued: [] };
+  const personal = new Set(open.filter((t) => !!t.ownerAgent && people.has(t.ownerAgent)).map((t) => t.id));
   const parents = new Map<string, string>();
   const parentIds = [...new Set(open.map((t) => t.parentId).filter((x): x is string => !!x))];
   if (parentIds.length) for (const t of await r.find("tasks", { id: parentIds })) parents.set(t.id, t.key);
   const inActive = (t: Task) => (activeKey && t.parentId && parents.get(t.parentId) === activeKey ? 0 : 1);
-  const jorge = (t: Task) => t.status === "Needs Jorge" || (!!ceoId && t.ownerAgent === ceoId);
-  // PLA-I36-6: the ticket Jorge picked goes first after his own.
+  const isOwners = (t: Task) => t.status === ST.needsOwner || personal.has(t.id) || (!!ceoId && t.ownerAgent === ceoId);
+  // PLA-I36-6: the ticket the owner picked goes first after his own.
   const first = (t: Task) => (p.settings.next_first === t.key ? 0 : 1);
-  const sorted = [...open].sort((a, b) => Number(!jorge(a)) - Number(!jorge(b)) || first(a) - first(b) || inActive(a) - inActive(b) || PRIORITY(a.priority) - PRIORITY(b.priority) || (a.phase ?? 99) - (b.phase ?? 99) || byKey(a, b));
+  const sorted = [...open].sort((a, b) => Number(!isOwners(a)) - Number(!isOwners(b)) || first(a) - first(b) || inActive(a) - inActive(b) || PRIORITY(a.priority) - PRIORITY(b.priority) || (a.phase ?? 99) - (b.phase ?? 99) || byKey(a, b));
   const t = sorted[0]!;
-  const theirs = sorted.filter((x) => x.status === "Ready" && !jorge(x));
+  const theirs = sorted.filter((x) => x.status === ST.ready && !isOwners(x));
   const ready = theirs.slice(0, 5).map((x) => ({ key: x.key, title: x.title }));
   const queued = theirs.map((x) => ({ key: x.key, title: x.title, owner: x.ownerAgent ?? null, work_type: x.workType ?? "code" }));
-  let owner: NextOwner = jorge(t) ? "jorge" : (t.workType ?? "code") === "code" ? "taller" : "po";
-  if (!jorge(t) && t.ownerAgent) {
+  let owner: NextOwner = isOwners(t) ? "owner" : (t.workType ?? "code") === "code" ? "taller" : "po";
+  if (!isOwners(t) && t.ownerAgent) {
     const a = await r.get("agents", { id: t.ownerAgent });
     const role = a ? roleOf(a) : null;
     if (role) owner = role === "product-owner" ? "po" : role;
@@ -251,6 +255,16 @@ export async function workOf(db: Db, p: Project): Promise<WorkLine> {
   const r = readerOf(db);
   const tickets = { projectId: p.id, kind: "ticket" };
   // Open: every ticket less the closed ones (a status is never null).
-  const open = (await r.count("tasks", tickets)) - (await r.count("tasks", { ...tickets, status: CLOSED }));
-  return { open, in_progress: await r.count("tasks", { ...tickets, status: "In progress" }) };
+  const open = (await r.count("tasks", tickets)) - (await r.count("tasks", { ...tickets, status: [...CLOSED] }));
+  return { open, in_progress: await r.count("tasks", { ...tickets, status: ST.inProgress }) };
+}
+
+// PLA-I74-4: src/state/workable.ts's parentNotOnHold and notPersonOwned over the store: which of the tickets' parents
+// are On hold initiatives, and which of their owners are people (a human agent or the ceo seat).
+async function workableFacts(r: Reader, ts: Task[]): Promise<{ onHold: Set<string>; people: Set<string> }> {
+  const parentIds = [...new Set(ts.map((t) => t.parentId).filter((x): x is string => !!x))];
+  const ownerIds = [...new Set(ts.map((t) => t.ownerAgent).filter((x): x is string => !!x))];
+  const onHold = new Set(parentIds.length ? (await r.find("tasks", { id: parentIds, status: ST.onHold })).map((t) => t.id) : []);
+  const people = new Set(ownerIds.length ? (await r.find("agents", { id: ownerIds })).filter((a) => a.kind === "human" || a.slug === "ceo").map((a) => a.id) : []);
+  return { onHold, people };
 }

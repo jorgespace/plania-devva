@@ -193,7 +193,7 @@ test("I40-6: latest carries a publish with its count and a delivery by title, ne
   const ev = (type: string, payload: Json, key: string | null, ago: number) =>
     store.fix(async (uow) => {
       const taskId = key ? ((await uow.get("tasks", { key }))?.id ?? null) : null;
-      await uow.insert("events", { projectId: pid, taskId, taskKey: key, type, actor: { agent: "jorge", session_id: "web" }, payload, createdAt: new Date(uow.now.getTime() - ago * 60_000) });
+      await uow.insert("events", { projectId: pid, taskId, taskKey: key, type, actor: { agent: "owner", session_id: "web" }, payload, createdAt: new Date(uow.now.getTime() - ago * 60_000) });
     });
   await store.fix((uow) => uow.delete("events", { projectId: pid, type: ["release.merged", "task.status"] }));
   await ev("task.status", { to: "In review", from: "In progress" }, t.key, 30);

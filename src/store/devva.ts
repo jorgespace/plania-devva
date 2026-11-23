@@ -644,15 +644,15 @@ export class DevvaStore implements Store {
 }
 
 // The devva client is not on npm: it is loaded from a built copy, by default vendor/devva-client, or the one
-// DEVVA_CLIENT (or the option) names.
+// DEVVA_CLIENT (or the option) names. An empty variable (a line of .env.example left blank) counts as unset.
 export async function loadClient(opts: DevvaOptions): Promise<() => Promise<DevvaClient>> {
   const root = path.resolve(import.meta.dirname, "..", "..");
-  const entry = opts.clientModule ?? process.env.DEVVA_CLIENT ?? path.join(root, "vendor", "devva-client", "lib", "index.js");
-  const tokenFile = opts.tokenFile ?? process.env.DEVVA_TOKEN_FILE ?? path.join(homedir(), ".config", "plania", "devva-token");
+  const entry = opts.clientModule || process.env.DEVVA_CLIENT?.trim() || path.join(root, "vendor", "devva-client", "lib", "index.js");
+  const tokenFile = opts.tokenFile || process.env.DEVVA_TOKEN_FILE?.trim() || path.join(homedir(), ".config", "plania", "devva-token");
   const token = readFileSync(tokenFile, "utf8").trim();
   process.env.DEVVA_TOKEN = token;
   const mod = (await import(pathToFileURL(entry).href)) as { connect(host: string, port: number, timeoutMs: number): Promise<DevvaClient> };
-  const host = opts.host ?? process.env.DEVVA_HOST ?? "127.0.0.1";
-  const port = opts.port ?? Number(process.env.DEVVA_PORT ?? 2505);
+  const host = opts.host || process.env.DEVVA_HOST?.trim() || "127.0.0.1";
+  const port = opts.port || Number(process.env.DEVVA_PORT?.trim() || 2505);
   return () => mod.connect(host, port, opts.timeoutMs ?? 15_000);
 }

@@ -1,11 +1,12 @@
-import type { Project, ReleaseSettings } from "../db/schema.js";
+import { frozen, prodEnvOf, prodMigrationsFromEnv } from "../camino/prod.js";
+import { PROD_MIGRATIONS, type ProdMigrations, type Project, type ReleaseSettings } from "../db/schema.js";
 import { readerOf } from "../store/port.js";
 import { openHumanActions } from "./blockers.js";
 import { ToolError } from "./errors.js";
 import { type Q } from "./tx.js";
 
 // 2.10 (item 2, phase one): the release is computed, never typed. A project with settings.release
-// {from, into, env} (sandbox → main, deployed to prod) has one step only Jorge takes: fast-forward
+// {from, into, env} (sandbox → main, deployed to prod) has one step only the owner takes: fast-forward
 // `into` to `from`. releasePlan says what that step ships: the heads, how many commits `from` is
 // ahead (the GitHub poller's compare, cached in poll_state by the pair of heads), the merged
 // tickets not yet released, the migrations they reserved that env does not run yet, the human
@@ -23,7 +24,17 @@ export type ReleaseCompare = {
   contains: boolean;
   commits: string[];
   shipped_at?: string;
+  // PLA-82 (F-32): migration files the release adds (absent in compares cached before it).
+  migration_files?: string[];
 };
+
+/** PLA-82 (F-32): files a compare adds under a migrations folder (drizzle, prisma, knex…); meta and snapshots apart. */
+export function migrationFiles(files: { filename: string; status: string }[]): string[] {
+  return files
+    .filter((f) => f.status === "added" && /(^|\/)(migrations?|drizzle)\/.+\.(sql|ts|js|mjs|cjs)$/i.test(f.filename) && !/(^|\/)(meta|snapshots?)\//i.test(f.filename))
+    .map((f) => f.filename)
+    .slice(0, 50);
+}
 
 export type ReleasePlan = {
   from: { branch: string; head_sha: string | null };
@@ -35,19 +46,33 @@ export type ReleasePlan = {
   commits: string[];
   tickets: { key: string; title: string; status: string; pr_url: string | null }[];
   migrations: string[];
+  // PLA-82 (F-32): the migration files the release adds (from GitHub's compare), whether or not a number was reserved.
+  migration_files: string[];
   before: { blocker_id: string; key: string; text: string }[];
   open_checks: number;
   command: string;
-  // 2.13: how Jorge ships it (settings.release.mode), the merge he already made from the screen for
+  // 2.13: how the owner ships it (settings.release.mode), the merge he already made from the screen for
   // this from head (the poller has not seen it land yet), and whether Lanzar may run now.
   mode: "command" | "merge";
   merged: { sha: string; pr_url: string; at: string } | null;
   ship: { ready: boolean; reason: ShipBlock | null };
+  // PLA-I68-1: who migrates production (settings.release.prod_migrations, else Camino's production environment).
+  prod_migrations: ProdMigrations | null;
+  // PLA-I68-6: Camino's production environment, as Publicar uses it (null when Camino names none).
+  // PLA-158 (F-25): db_missing says the environment has a database whose service nobody picked, the one field that
+  // keeps «who migrates» unanswered (prodMigrationsFromEnv), so the screen can name it.
+  prod_env: { id: string; name: string; sql_review: boolean; approve_destructive: boolean; backup: string | null; health: { url: string | null; pages: string[] }; freeze: boolean; db_missing?: "provider" | null } | null;
 };
 
+/** PLA-I68-1: the release adds migrations (reserved numbers or files in the compare) and the project names nobody to
+ * migrate production. The local test copy Plania migrates is never production. */
+export const prodMigrationUnhandled = (r: Pick<ReleaseSettings, "prod_migrations">, migrations: string[], files: string[]): boolean =>
+  (migrations.length > 0 || files.length > 0) && !r.prod_migrations;
+
 // Why Lanzar is off: command mode, nothing ahead, no GitHub data to know, a before-step or a check
-// still open, already merged.
-export type ShipBlock = "mode_command" | "no_repo" | "no_github_data" | "nothing_to_ship" | "before_steps" | "open_checks" | "merged";
+// still open, already merged, or (PLA-I68-1) the release adds migrations and nobody is named to migrate production.
+// PLA-I68-6: or the production environment's freeze window is on.
+export type ShipBlock = "mode_command" | "no_repo" | "no_github_data" | "nothing_to_ship" | "before_steps" | "open_checks" | "merged" | "freeze" | "prod_migration_unhandled";
 
 const BRANCH = /^[A-Za-z0-9._/-]{1,200}$/;
 const ENV = /^[a-z][a-z0-9_-]{0,29}$/;
@@ -56,14 +81,15 @@ const ENV = /^[a-z][a-z0-9_-]{0,29}$/;
 export function checkReleaseSettings(v: unknown): ReleaseSettings {
   const bad = (hint: string) => new ToolError("INVALID_FILTER", { field: "settings.release", hint });
   if (!v || typeof v !== "object" || Array.isArray(v)) throw bad('{from: "sandbox", into: "main", env: "prod"}');
-  const { from, into, env, mode, ...rest } = v as Record<string, unknown>;
+  const { from, into, env, mode, prod_migrations, ...rest } = v as Record<string, unknown>;
   if (Object.keys(rest).length) throw bad(`unknown keys: ${Object.keys(rest).join(", ")}`);
   if (typeof from !== "string" || !BRANCH.test(from)) throw bad("from is a branch name, e.g. sandbox");
   if (typeof into !== "string" || !BRANCH.test(into)) throw bad("into is a branch name, e.g. main");
   if (from === into) throw bad("from and into are different branches");
   if (typeof env !== "string" || !ENV.test(env)) throw bad("env is lowercase, e.g. prod");
   if (mode !== undefined && mode !== "command" && mode !== "merge") throw bad('mode is "command" (default) or "merge"');
-  return { from, into, env, ...(mode === "merge" ? { mode } : {}) };
+  if (prod_migrations !== undefined && prod_migrations !== null && !PROD_MIGRATIONS.includes(prod_migrations as ProdMigrations)) throw bad('prod_migrations is "deploy", "owner" or "none"');
+  return { from, into, env, ...(mode === "merge" ? { mode } : {}), ...(prod_migrations ? { prod_migrations: prod_migrations as ProdMigrations } : {}) };
 }
 
 export const releaseCommand = (r: ReleaseSettings) => `git fetch origin && git checkout ${r.into} && git merge --ff-only origin/${r.from} && git push origin ${r.into}`;
@@ -125,9 +151,16 @@ export async function releasePlan(db: Q, p: Project): Promise<ReleasePlan | null
 
   const open_checks = ids.length ? await store.count("checks", { taskId: ids, done: false, waivedAt: null }) : 0;
 
+  // PLA-I68-6: Camino's production environment: who migrates it, its freeze window, its SQL review and approval.
+  const cam = await store.get("camino", { projectId: p.id });
+  const prodEnv = prodEnvOf(cam?.config ?? {}, r);
+  // PLA-132: once the owner has saved Camino's environments, its production environment is the one place that says
+  // who migrates; the older settings.release.prod_migrations only answers while Camino has said nothing.
+  const prodMig = (cam?.config?.envs ? prodMigrationsFromEnv(prodEnv) : null) ?? r.prod_migrations ?? null;
   const mode = r.mode ?? "command";
   const merged = fromHead ? await mergedFromScreen(db, p.id, fromHead) : null;
   const pending = !shipped && (ahead ?? 0) > 0 && shipping.length > 0;
+  const migration_files = shipped ? [] : (fresh?.migration_files ?? []);
   const reason: ShipBlock | null =
     mode !== "merge" ? "mode_command"
     : !p.settings.github?.repo ? "no_repo"
@@ -137,6 +170,8 @@ export async function releasePlan(db: Q, p: Project): Promise<ReleasePlan | null
     : !pending ? "nothing_to_ship"
     : before.length ? "before_steps"
     : open_checks ? "open_checks"
+    : frozen(prodEnv, new Date()) ? "freeze"
+    : prodMigrationUnhandled({ prod_migrations: prodMig ?? undefined }, migrations, migration_files) ? "prod_migration_unhandled"
     : null;
 
   return {
@@ -148,16 +183,21 @@ export async function releasePlan(db: Q, p: Project): Promise<ReleasePlan | null
     commits: fresh?.commits ?? [],
     tickets: shipping.map((t) => ({ key: t.key, title: t.title, status: t.status, pr_url: t.prUrl ?? prOf(t.id)?.url ?? null })),
     migrations,
+    migration_files,
     before,
     open_checks,
     command: releaseCommand(r),
     mode,
     merged,
     ship: { ready: reason === null, reason },
+    prod_migrations: prodMig ?? null,
+    prod_env: prodEnv
+      ? { id: prodEnv.id, name: prodEnv.name, sql_review: !!prodEnv.database?.sql_review, approve_destructive: !!prodEnv.database?.approve_destructive, backup: prodEnv.database?.backup ?? null, health: prodEnv.health, freeze: prodEnv.freeze, db_missing: prodEnv.database && !prodEnv.database.provider ? "provider" : null }
+      : null,
   };
 }
 
-// The release.merged event Jorge's Lanzar wrote for this from head, if any: between the merge and the
+// The release.merged event the owner's Lanzar wrote for this from head, if any: between the merge and the
 // poller's next compare the step still shows, as merged, and Lanzar stays off.
 async function mergedFromScreen(db: Q, projectId: string, fromHead: string): Promise<ReleasePlan["merged"]> {
   // Newest first; the payload's from.head_sha is matched here, the store filters on columns only.
@@ -172,6 +212,6 @@ async function mergedFromScreen(db: Q, projectId: string, fromHead: string): Pro
  * ahead is unknown. Said as "sin datos de GitHub", never as nothing to ship. */
 export const releaseUnknown = (plan: ReleasePlan | null): plan is ReleasePlan => !!plan && !plan.merged && !plan.shipped && plan.ahead === null && plan.tickets.length > 0;
 
-/** The plan waits on Jorge: `from` is ahead and carries tickets. Once Jorge published this `from` head (merged),
+/** The plan waits on the owner: `from` is ahead and carries tickets. Once the owner published this `from` head (merged),
  * it no longer waits, even before the poller's next compare catches up; a new commit on `from` clears merged. */
 export const releasePending = (plan: ReleasePlan | null): plan is ReleasePlan => !!plan && !plan.merged && !plan.shipped && (plan.ahead ?? 0) > 0 && plan.tickets.length > 0;

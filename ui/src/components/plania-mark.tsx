@@ -1,6 +1,9 @@
 import { useId, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
+import { logoGradient, logoOf, logoUrl, readableOnDark, setLogos, type LogoRef } from "@/lib/logos";
 
 // A brand mark: a glyph cut from a two-stop gradient, with an optional darker shade cut from
 // the same glyph. Ids are scoped per instance so several marks on one page don't share (and
@@ -45,80 +48,11 @@ const PLANIA: Brand = {
   ),
 };
 
-// Each project's own mark, by slug (from the logo export: the bare mark, not the app-icon tile).
+// PLA-I2-3: no project's logo lives in the product. Plania is the one built-in mark; every other project gets a
+// monogram in colours derived from its slug, so a new project has a mark without a code change.
 const PROJECTS: Record<string, Brand> = {
-  // PLA-I51-1: Plania is a project too; its violet accent stays apart from MiCasa's blue-violet.
+  // PLA-I51-1: Plania is a project too; its violet accent stays apart from the fallback pairs.
   plania: { ...PLANIA, accent: "#a58bff" },
-  // An F drawn as a film strip, with sprocket holes punched along it.
-  filmia: {
-    from: "#FF6A3D",
-    accent: "#FF6A3D",
-    to: "#C4237F",
-    glyph: (
-      <>
-        <g {...stroke}>
-          <path d="M22 18V84" />
-          <path d="M22 18H80" />
-          <path d="M22 50H64" />
-        </g>
-        <g fill="#000">
-          <rect x="18" y="30" width="8" height="6" rx="1.5" />
-          <rect x="18" y="39" width="8" height="6" rx="1.5" />
-          <rect x="18" y="62" width="8" height="6" rx="1.5" />
-          <rect x="18" y="71" width="8" height="6" rx="1.5" />
-          <rect x="40" y="14" width="6" height="8" rx="1.5" />
-          <rect x="52" y="14" width="6" height="8" rx="1.5" />
-          <rect x="64" y="14" width="6" height="8" rx="1.5" />
-        </g>
-      </>
-    ),
-    shade: { d: "M14 34L30 18V54L14 70Z", opacity: 0.16 },
-  },
-  // A roof over an M.
-  micasa: {
-    from: "#2563EB",
-    accent: "#7B8CFF",
-    to: "#8B3FD9",
-    glyph: (
-      <>
-        <path d="M10 44L50 12L90 44" {...stroke} />
-        <path d="M22 90V56L50 78L78 56V90" {...stroke} />
-      </>
-    ),
-  },
-  // A W of three people, arms up.
-  workia: {
-    from: "#19C8A0",
-    accent: "#19C8A0",
-    to: "#0B7FA6",
-    glyph: (
-      <>
-        <path d="M14 30L30 84L50 52L70 84L86 30" {...stroke} />
-        <circle cx="14" cy="12" r="8" fill="#fff" />
-        <circle cx="86" cy="12" r="8" fill="#fff" />
-        <circle cx="50" cy="32" r="8" fill="#fff" />
-      </>
-    ),
-    shade: { d: "M6 40L22 24L38 78L24 90Z", opacity: 0.14 },
-  },
-  // A receipt with a Z cut through it.
-  zigzag: {
-    from: "#FFB224",
-    accent: "#FFB224",
-    to: "#E8482E",
-    glyph: (
-      <>
-        <path
-          d="M22 10L30 16L38 10L46 16L54 10L62 16L70 10L78 16V84L70 90L62 84L54 90L46 84L38 90L30 84L22 90Z"
-          fill="#fff"
-          stroke="#fff"
-          strokeWidth="4"
-          strokeLinejoin="round"
-        />
-        <path d="M34 36H66L34 64H66" fill="none" stroke="#000" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
-      </>
-    ),
-  },
 };
 
 export function PlaniaMark({ className }: { className?: string }) {
@@ -174,22 +108,55 @@ export function CrossMark({ className }: { className?: string }) {
   return <BrandMark brand={CROSS} className={cn("shrink-0", className)} />;
 }
 
-/**
- * The project's logo. Without one it draws nothing, unless `fallback` asks for a monogram (the brief always shows a
- * mark; Inicio does not).
- */
-export function ProjectMark({ slug, className, fallback, name }: { slug: string; className?: string; fallback?: boolean; name?: string }) {
-  const brand = PROJECTS[slug] ?? (fallback ? monogram(slug, name) : undefined);
-  return brand ? <BrandMark brand={brand} className={cn("shrink-0", className)} /> : null;
+// PLA-I66-1: the projects' real logos, read once for the whole screen (every ProjectMark shares the query).
+function useLogos(): Record<string, LogoRef> {
+  const q = useQuery({
+    queryKey: ["logos"],
+    queryFn: () =>
+      api.logos().then((r) => {
+        setLogos(r.logos);
+        return r.logos;
+      }),
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+  });
+  return q.data ?? {};
 }
 
-export const hasProjectMark = (slug: string) => slug in PROJECTS;
+/**
+ * The project's mark: its own logo when Plania has one (found in its repo, uploaded or chosen; PLA-I66-1), else
+ * Plania's built-in mark for Plania, else a monogram in its slug's colours (PLA-I2-3: every project has one).
+ */
+export function ProjectMark({ slug, className, name }: { slug: string; className?: string; fallback?: boolean; name?: string }) {
+  const logo = useLogos()[slug];
+  if (logo) {
+    return (
+      <img
+        src={logoUrl(slug, logo)}
+        alt=""
+        aria-hidden
+        draggable={false}
+        data-logo={logo.source}
+        className={cn("shrink-0", logo.variant === "icon" ? "rounded-[22%] object-cover" : "object-contain", className)}
+      />
+    );
+  }
+  const brand = PROJECTS[slug] ?? monogram(slug, name);
+  return <BrandMark brand={brand} className={cn("shrink-0", className)} />;
+}
 
-/** The project's accent taken from its logo, when it has one. */
-export const projectBrandAccent = (slug: string): string | undefined => PROJECTS[slug]?.accent;
+export const hasProjectMark = (_slug: string) => true;
+
+/** The project's accent taken from its logo, when it has one (made readable on the dark surfaces). */
+export const projectBrandAccent = (slug: string): string | undefined => {
+  const g = logoGradient(logoOf(slug));
+  return g ? readableOnDark(g[0]) : PROJECTS[slug]?.accent;
+};
 
 /** The project's two gradient stops (its logo's, else its fallback pair), for bands and stripes. */
 export const projectGradient = (slug: string): [string, string] => {
+  const g = logoGradient(logoOf(slug));
+  if (g) return g;
   const b = PROJECTS[slug];
   return b ? [b.from, b.to] : fallbackAccent(slug);
 };

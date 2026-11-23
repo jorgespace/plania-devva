@@ -373,7 +373,7 @@ const detachedDeps = (ms = 300) => {
     if (args[0] === "worktree" && args[1] === "add") mkdirSync(args[args[2] === "--no-track" ? 3 : 2]!, { recursive: true });
     return { code: 0, stdout: "", stderr: "" };
   };
-  const deps = { ...f.deps, git, spawn: undefined, detached: true, pollMs: 50, env: { ...f.deps.env, CLAUDE_CODE_BIN: FAKE, FAKE_MS: String(ms), PATH: process.env.PATH } };
+  const deps = { ...f.deps, git, spawn: undefined, detached: true, pollMs: 50, env: { ...f.deps.env, CLAUDE_CODE_BIN: FAKE, CLAUDE_FAKE_MS: String(ms), PATH: process.env.PATH } };
   return deps;
 };
 
@@ -585,7 +585,7 @@ test("I60-5 #1: the preview says what Guardar would start and offers the number 
   let c = alv.countsOf(r, team)!;
   let p = alv.previewAdmission(r, c, team, "Mianovia");
   assert.equal(p.verdicts[0]!.code, "ceiling");
-  assert.equal(p.verdicts[0]!.fix!.label, "Subir el tope de la Mac a 4");
+  assert.equal(p.verdicts[0]!.fix!.label, "Subir el tope de la máquina a 4");
   assert.equal(p.verdicts[1]!.code, "areas", "same files is not something a number fixes");
   assert.equal(p.verdicts[1]!.fix, null);
   // Apply each fix in turn, as the owner would from the queue card.
@@ -603,4 +603,201 @@ test("I60-5 #1: the preview says what Guardar would start and offers the number 
   // The save carries exactly the changed numbers.
   const save = alv.withCounts({ project: "mianovia" }, alv.countsOf(r, team), c);
   assert.deepEqual(save, { project: "mianovia", seats: [{ agent: "po-x", max_parallel: 2 }], floor: { max_concurrent: 3 }, company: { max_concurrent: 4 } });
+});
+
+// ---- PLA-58: what a run really changes, and the files every step builds on.
+
+const touchedMod = await import("../src/runner/touched.js");
+const { writeFileSync } = await import("node:fs");
+const areasOf = async (key: string) => (await store.get("tasks", { key }))!.areas;
+const heldOf = async (runId: string) => {
+  const r = (await store.get("agentRuns", { id: runId }))!;
+  return { status: r.status, held_code: r.heldCode, held_detail: r.heldDetail };
+};
+
+test("PLA-58 #1: a live Taller run's changed files outside its areas join them on the next tick; covered files add nothing", async () => {
+  await t2Reset();
+  const key = await ticketIn("micasa", "Registro con piezas", { areas: ["src/app/registro/**"] });
+  const wt = path.join(scratch, "wt-touched");
+  mkdirSync(wt, { recursive: true });
+  writeFileSync(path.join(wt, ".git"), "gitdir: /nowhere\n");
+  const [taller, micasa] = [await agentId("taller-micasa"), await store.projectId("micasa")];
+  await store.fix((uow) =>
+    uow.insert("agentRuns", { agentId: taller, projectId: micasa, role: "taller", status: "running", summary: "running", taskKey: key, workKey: `task:${key}`, trigger: "event", startedAt: uow.now, workerId: "other:main", worktreePath: wt, lane: "work" }),
+  );
+  const out: Record<string, string> = {
+    diff3: "src/app/registro/formulario.tsx\nsrc/components/ui/native-select.tsx\n",
+    diffHead: "src/app/registro/formulario.tsx\n",
+    others: "src/app/registro/nuevo.tsx\n",
+  };
+  const git = async (args: string[]) => ({ code: 0, stderr: "", stdout: args[0] === "ls-files" ? out.others! : args[2] === "HEAD" ? out.diffHead! : out.diff3! });
+  const { version } = (await store.get("tasks", { key }))!;
+
+  assert.deepEqual(await touchedMod.sweepTouched(db, { git }), { grown: 1 });
+  assert.deepEqual(await areasOf(key), ["src/app/registro/**", "src/components/ui/native-select.tsx"]);
+  const ev = await store.find("events", { taskKey: key, type: "task.areas_touched" });
+  assert.deepEqual(ev.map((e) => [e.actor.session_id, e.payload.files]), [["system", ["src/components/ui/native-select.tsx"]]]);
+  assert.equal((await store.get("tasks", { key }))!.version, version, "derived, not an edit: the run's own writes are not refused");
+  assert.deepEqual(await touchedMod.sweepTouched(db, { git }), { grown: 0 }, "covered now");
+
+  // Many new files in one folder become the folder.
+  out.diff3 = Array.from({ length: 14 }, (_, i) => `src/lib/gen/f${i}.ts`).join("\n");
+  assert.deepEqual(await touchedMod.sweepTouched(db, { git }), { grown: 1 });
+  assert.ok((await areasOf(key)).includes("src/lib/gen/**"));
+  await store.fix(deleteRuns);
+});
+
+test("PLA-58 #2: shared paths keep code runs apart and the hold names the ticket and the files", async () => {
+  // MIA-I7-2 (registro) is changing the shared NativeSelect; MIA-I7-3 (panel) declares only its own folder.
+  await t2Reset();
+  await setRunner("micasa", { max_concurrent: 5, max_per_agent: 5 });
+  const i2 = await ticketIn("micasa", "Registro", { areas: ["src/app/registro/**", "src/components/ui/native-select.tsx"] });
+  await liveRun("taller-micasa", "micasa", i2);
+  const i3 = await ticketIn("micasa", "Panel", { areas: ["src/app/panel/**"] });
+  const q3 = await queueRun("taller-micasa", "micasa", i3);
+  const f = fakes();
+  await runner.drainQueue(db, new Date(), f.deps as never);
+  const held = await heldOf(q3);
+  assert.deepEqual([held.status, held.held_code], ["queued", "areas"]);
+  assert.deepEqual(held.held_detail, { with: i2, files: ["src/components/ui/native-select.tsx"] });
+  assert.equal(alv.heldText("areas", held.held_detail, "Taller"), `Espera a ${i2}: cambia src/components/ui/native-select.tsx`);
+  assert.equal(alv.heldText("areas", {}, "Taller"), "Espera: otro trabajo toca los mismos archivos", "an old hold without detail still reads");
+
+  // The project says nothing is shared: the panel starts.
+  await setRunner("micasa", { max_concurrent: 5, max_per_agent: 5, shared_areas: [] });
+  await runner.drainQueue(db, new Date(), f.deps as never);
+  assert.equal((await heldOf(q3)).status, "running");
+  await finishAll(f);
+});
+
+test("PLA-58 #3: no shared or overlapping path starts side by side; a ticket that declares a shared path waits for any live code run", async () => {
+  await t2Reset();
+  await setRunner("micasa", { max_concurrent: 5, max_per_agent: 5 });
+  const a = await ticketIn("micasa", "Registro", { areas: ["src/app/registro/**"] });
+  await liveRun("taller-micasa", "micasa", a);
+  const b = await queueRun("taller-micasa", "micasa", await ticketIn("micasa", "Panel", { areas: ["src/app/panel/**"] }));
+  const deps = await ticketIn("micasa", "Dependencias", { areas: ["package.json"] });
+  const c = await queueRun("taller-micasa", "micasa", deps);
+  const f = fakes();
+  await runner.drainQueue(db, new Date(), f.deps as never);
+  assert.equal((await heldOf(b)).status, "running", "separate folders, nothing shared");
+  const hc = await heldOf(c);
+  assert.deepEqual([hc.status, hc.held_code, (hc.held_detail as { files: string[] }).files], ["queued", "areas", ["package.json"]]);
+  // The default list, as the screen and the runner read it.
+  assert.ok(touchedMod.isShared("src/components/ui/button.tsx", touchedMod.sharedAreasOf(undefined)));
+  assert.ok(!touchedMod.isShared("src/app/panel/page.tsx", touchedMod.sharedAreasOf(undefined)));
+  await finishAll(f);
+});
+
+// ---- PLA-118: logo marks are the owner's own ask, with no ticket
+
+// The Artist prompt doc in the project, unless it is there already.
+const artistPrompt = (projectId: string) =>
+  store.fix(async (uow) => {
+    if (!(await uow.get("docs", { projectId, title: "Prompt: Artist" }))) await uow.insert("docs", { projectId, title: "Prompt: Artist", markdown: "# Artist", actor: { agent: "test", session_id: "s" } });
+  });
+
+test("PLA-118 #1 #2: a queued Artist run for a drawing marks request starts with no ticket; one with no marker is still skipped", async () => {
+  await t2Reset();
+  process.env.PLANIA_CAPTURES_DIR = path.join(scratch, "captures");
+  const marks = await import("../src/brand/marks.js");
+  const { ensureMember } = await import("../src/runner/team.js");
+  const p = (await store.get("projects", { slug: "micasa" }))!;
+  const project = { id: p.id, slug: p.slug, title: p.title };
+  await ensureMember(db, project as never, "artist", { note: "test" } as never);
+  const artistRow = (await store.find("agents", { projectId: project.id, roleTemplate: "artist" }))[0]!;
+  await artistPrompt(project.id);
+  // The request as the screen makes it; the wake is the queue row below.
+  // A wake that says it queued (since PLA-120 a request with no run fails at once); the queue row is made below.
+  const req = await marks.requestMarks(db, project, { about: "Una tienda de barrio" }, { wake: async () => ({ runId: crypto.randomUUID() }) });
+  assert.equal(req.status, "drawing");
+  const queueArtist = async (reason: string) =>
+    (
+      await store.fix((uow) =>
+        uow.insert("agentRuns", { agentId: artistRow.id, projectId: project.id, role: "artist", status: "queued", summary: "queued: event x", taskKey: null, workKey: `general:${crypto.randomUUID()}`, trigger: "event", lane: "work", reason }),
+      )
+    ).id;
+  const plain = await queueArtist("look around");
+  const f = fakes();
+  await runner.drainQueue(db, new Date(), f.deps as never);
+  const plainRow = (await store.get("agentRuns", { id: plain }))!;
+  assert.deepEqual([plainRow.status, plainRow.summary], ["skipped", "no ready work"], "an Artist with no ticket and no marks marker has nothing to do");
+  const drawing = await queueArtist(`${marks.MARKS_MARK} ${req.id}] Draw logo marks for ${project.title}; answer with deliver_marks`);
+  await runner.drainQueue(db, new Date(), f.deps as never);
+  const drawingRow = (await store.get("agentRuns", { id: drawing }))!;
+  assert.equal((await statusOf(drawing)).status, "running", JSON.stringify({ status: drawingRow.status, summary: drawingRow.summary }));
+  await finishAll(f);
+});
+
+// PLA-127: the whole loop the guided logo test found broken twice (PLA-118 the start, PLA-119 the answer): the owner's
+// request queues Artist, the queue starts it with no ticket, and Artist's answer from that run's own session lands.
+test("PLA-127: a marks request goes request → queue → running → deliver_marks from the run's session → ready", async () => {
+  await t2Reset();
+  process.env.PLANIA_CAPTURES_DIR = path.join(scratch, "captures-e2e");
+  const marks = await import("../src/brand/marks.js");
+  const { ensureMember } = await import("../src/runner/team.js");
+  const sessions2 = await import("../src/runner/run-session.js");
+  await store.fix((uow) => uow.update("projects", { slug: "micasa" }, { runsPaused: false }));
+  const p = (await store.get("projects", { slug: "micasa" }))!;
+  const project = { id: p.id, slug: p.slug, title: p.title };
+  await ensureMember(db, project as never, "artist", { note: "test" } as never);
+  await artistPrompt(project.id);
+  // The real wake (no injected one): what the screen's «Generar 6 marcas» does.
+  const req = await marks.requestMarks(db, project, { about: "Una tienda de barrio" });
+  assert.equal(req.status, "drawing");
+  assert.ok(req.runId, "a run was queued");
+  const f = fakes();
+  await runner.drainQueue(db, new Date(), f.deps as never);
+  assert.equal((await statusOf(req.runId!)).status, "running", "the queue starts Artist with no ticket");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#1d4ed8"/><path d="M30 70V30h40" stroke="#ffffff" stroke-width="12" fill="none" stroke-linecap="round"/></svg>`;
+  const out = await marks.deliverMarks(db, { project: "micasa", id: req.id, marks: [{ name: "Esquina", idea: "Una esquina", svg }] }, { agent: "plania-runner", session_id: sessions2.runSession(req.runId!) });
+  assert.equal(out.kept, 1);
+  assert.equal(marks.latestRequest("micasa")?.status, "ready");
+  await finishAll(f);
+});
+
+// The project's settings without the named keys (settings - 'runner' - 'velocidad').
+const dropSettings = (slug: string, ...keys: string[]) =>
+  store.fix(async (uow) => {
+    const p = (await uow.get("projects", { slug }))!;
+    const settings: Record<string, unknown> = { ...p.settings };
+    for (const k of keys) delete settings[k];
+    await uow.update("projects", { id: p.id }, { settings: settings as typeof p.settings });
+  });
+
+// PLA-I73-5: lanes. With no caps set by hand, a project runs settings.velocidad.carriles Taller steps at once (2 by
+// default), never two whose areas overlap.
+test("PLA-I73-5: two Taller steps with separate files start together, a third waits; carriles 1 or shared files keep one", async () => {
+  await t2Reset();
+  await dropSettings("micasa", "runner", "velocidad");
+  const f = fakes();
+  const a = await queueRun("taller-micasa", "micasa", await ticketIn("micasa", "Panel", { areas: ["src/app/panel/**"] }));
+  const b = await queueRun("taller-micasa", "micasa", await ticketIn("micasa", "Revista", { areas: ["src/app/catalogo/**"] }));
+  const c = await queueRun("taller-micasa", "micasa", await ticketIn("micasa", "Asesora", { areas: ["src/app/asesora/**"] }));
+  await runner.drainQueue(db, new Date(), f.deps as never);
+  assert.deepEqual([await statusOf(a), await statusOf(b)].map((s) => s.status), ["running", "running"]);
+  assert.equal((await statusOf(c)).status, "queued");
+  await finishAll(f);
+
+  await t2Reset();
+  const g = fakes();
+  const d = await queueRun("taller-micasa", "micasa", await ticketIn("micasa", "Vestidos", { areas: ["src/db/**"] }));
+  const e = await queueRun("taller-micasa", "micasa", await ticketIn("micasa", "Favoritas", { areas: ["src/db/favoritas.ts"] }));
+  await runner.drainQueue(db, new Date(), g.deps as never);
+  assert.deepEqual([(await statusOf(d)).status, await statusOf(e)], ["running", { status: "queued", held_code: "areas" }]);
+  await finishAll(g);
+
+  await t2Reset();
+  await store.fix(async (uow) => {
+    const p = (await uow.get("projects", { slug: "micasa" }))!;
+    await uow.update("projects", { id: p.id }, { settings: { ...p.settings, velocidad: { carriles: 1 } } });
+  });
+  const h = fakes();
+  const x = await queueRun("taller-micasa", "micasa", await ticketIn("micasa", "Uno solo", { areas: ["src/a/**"] }));
+  const y = await queueRun("taller-micasa", "micasa", await ticketIn("micasa", "Otro", { areas: ["src/b/**"] }));
+  await runner.drainQueue(db, new Date(), h.deps as never);
+  assert.equal((await statusOf(x)).status, "running");
+  assert.equal((await statusOf(y)).status, "queued");
+  await finishAll(h);
+  await dropSettings("micasa", "velocidad");
 });

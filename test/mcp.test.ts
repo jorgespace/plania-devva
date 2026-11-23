@@ -117,7 +117,7 @@ async function eventCount(): Promise<number> {
 
 const lastLog = async (project: string, key: string): Promise<Json> => (await logOf(project, key)).at(-1)!;
 
-const MOVE = { reason: "él lo pidió", delegated_by_jorge: { message_id: "msg-owner-9001", quote: "haz ese cambio de estado" } };
+const MOVE = { reason: "él lo pidió", delegated_by_owner: { message_id: "msg-owner-9001", quote: "haz ese cambio de estado" } };
 
 // A move from the screen, as Jorge: any status. Checks still apply to Done, so they get ticked.
 // Won't do and reopening need a reason; the screen session is the evidence.
@@ -156,9 +156,9 @@ after(async () => {
 
 // The full tool surface. Update with the contract.
 const TOOLS = [
-  "add_decision", "add_result", "answer", "answer_consulta", "answer_delegated", "ask", "assign", "attach_doc", "attach_frames", "audit", "batch", "check_in", "claim", "comment", "consume", "create_company_project", "create_task", "finish",
+  "add_decision", "add_result", "answer", "answer_consulta", "answer_delegated", "ask", "assign", "attach_doc", "attach_frames", "audit", "batch", "check_in", "claim", "comment", "consume", "create_company_project", "create_task", "deliver_marks", "deliver_stage", "finish",
   "get_context", "get_digest", "get_doc", "get_inbox", "get_memory", "get_next", "get_project", "get_resume", "get_running", "get_task", "handoff", "lease_resource",
-  "list_agents", "list_events", "list_goals", "list_heartbeat_runs", "list_projects", "list_routine_runs", "list_tasks", "propose", "record_routine_run", "register_footprint", "release_footprint", "release_resource", "report_tokens", "reserve_sequence", "retire_decision", "search", "set_agent", "set_check", "set_env",
+  "list_agents", "list_events", "list_goals", "list_heartbeat_runs", "list_projects", "list_routine_runs", "list_tasks", "propose", "propose_seat", "record_routine_run", "register_footprint", "release_footprint", "release_resource", "report_tokens", "reserve_sequence", "retire_decision", "search", "set_agent", "set_check", "set_env",
   "set_goal", "set_metric", "set_project", "set_task", "start", "thread_post", "thread_read", "usage_summary", "waive_check", "wake_agent",
 ];
 
@@ -338,7 +338,7 @@ describe("set_task", () => {
     assert.ok(first instanceof Date);
     await call("set_task", { project: "micasa", key: "MIC-B-01", status: "Done", summary: "again" });
     assert.deepEqual(await resolvedAt("MIC-B-01"), first, "re-marking Done keeps the first timestamp");
-    await call("set_task", { project: "micasa", key: "MIC-B-01", status: "Ready", ...MOVE, delegated_by_jorge: { message_id: "msg-owner-9002", quote: "vuelve a dejarlo en ready" } });
+    await call("set_task", { project: "micasa", key: "MIC-B-01", status: "Ready", ...MOVE, delegated_by_owner: { message_id: "msg-owner-9002", quote: "vuelve a dejarlo en ready" } });
     assert.equal(await resolvedAt("MIC-B-01"), null);
   });
 
@@ -409,7 +409,7 @@ describe("initiative status through set_task", () => {
     const t = await call("set_task", { project: "micasa", key: "MIC-I-DONE", status: "Done" });
     assert.equal(t.status, "Done");
     assert.ok((await resolvedAt("MIC-I-DONE")) instanceof Date);
-    await call("set_task", { project: "micasa", key: "MIC-I-DONE", status: "On hold", ...MOVE, delegated_by_jorge: { message_id: "msg-owner-9003", quote: "pon la iniciativa en pausa" } });
+    await call("set_task", { project: "micasa", key: "MIC-I-DONE", status: "On hold", ...MOVE, delegated_by_owner: { message_id: "msg-owner-9003", quote: "pon la iniciativa en pausa" } });
     assert.equal(await resolvedAt("MIC-I-DONE"), null);
   });
 
@@ -783,7 +783,7 @@ describe("v2 B1: state machine and work types", () => {
       key: "ZIG-M-01",
       status: "Won't do",
       reason: "ya no hace falta",
-      delegated_by_jorge: { message_id: "msg-owner-9004", quote: "marcalo wont do ya mismo" },
+      delegated_by_owner: { message_id: "msg-owner-9004", quote: "marcalo wont do ya mismo" },
     });
     assert.equal(t.status, "Won't do");
     const moved = (await logOf("zigzag", "ZIG-M-01")).find((e: Json) => e.type === "task.delegated_move");
@@ -1058,11 +1058,11 @@ describe("v2 C1: questions", () => {
   const P = { project: "micasa" };
   const B = { agent: "qa", session_id: "s2" };
 
-  test("ask moves a ticket to Needs Jorge and keeps the lease; the answer is a decision and restores In progress", async () => {
+  test("ask moves a ticket to Needs owner and keeps the lease; the answer is a decision and restores In progress", async () => {
     await call("create_task", { ...P, key: "MIC-Q-01", title: "Import CSV" });
     await call("claim", { ...P, key: "MIC-Q-01" });
     const { question, task } = await call("ask", { ...P, key: "MIC-Q-01", question: "Support BBVA's CSV too?", options: ["Yes", "No"] });
-    assert.equal(task.status, "Needs Jorge");
+    assert.equal(task.status, "Needs owner");
     assert.equal(task.claim.live, true);
     await expectError("set_task", { ...P, key: "MIC-Q-01", status: "Ready" }, "INVALID_TRANSITION", 409);
     const second = (await call("ask", { ...P, key: "MIC-Q-01", question: "Max file size?", actor: B })).question;
@@ -1073,7 +1073,7 @@ describe("v2 C1: questions", () => {
     assert.deepEqual(a.decision.tags, ["answer"]);
     assert.equal(a.decision.task_key, "MIC-Q-01");
     assert.equal(a.question.decision_id, a.decision.id);
-    assert.equal(a.task.status, "Needs Jorge", "one question is still open");
+    assert.equal(a.task.status, "Needs owner", "one question is still open");
     const b = await call("answer", { ...P, question_id: second.id, answer: "10 MB" });
     assert.equal(b.decision, null, "an answer without decision_text writes no decision");
     assert.equal(b.question.decision_id, null);
@@ -1150,7 +1150,7 @@ describe("v2 C2: list_events", () => {
 describe("v2 C4: protocol and project text", () => {
   test("the protocol comes with initialize, versioned", async () => {
     const text = client.getInstructions() ?? "";
-    assert.match(text, /^Plania protocol 2\.22\./);
+    assert.match(text, /^Plania protocol 2\.26\./);
     assert.match(text, /A human_only question is answered on the owner's screen/);
     assert.equal(/\bgates?\b/i.test(text.replaceAll("merge-gate", "")), false, "2.17: the protocol names no gate");
     assert.match(text, /answer_delegated/);
@@ -1158,9 +1158,9 @@ describe("v2 C4: protocol and project text", () => {
     assert.match(text, /set_task Done once it is Merged or Released/);
     assert.match(text, /Won't do and reopening a closed task need a reason/);
     assert.match(text, /Unknown or missing data is caution, never ready/);
-    assert.equal(client.getServerVersion()?.version, "2.22.0");
+    assert.equal(client.getServerVersion()?.version, "2.26.0");
     const p = await call("get_project", { project: "zigzag" });
-    assert.equal(p.protocol_version, "2.22");
+    assert.equal(p.protocol_version, "2.26");
   });
 
   test("set_project edits body and rules with the version; rules_version follows the rules", async () => {

@@ -53,7 +53,7 @@ export type ProjectFacts = {
 };
 
 export type CompanyExtras = {
-  // The route only answers Jorge's cookie, so this is always true there. The sheets take it as a prop and
+  // The route only answers the owner's cookie, so this is always true there. The sheets take it as a prop and
   // hide Cambiar and Mover guardia when it is false.
   viewer: { can_edit_limits: boolean };
   prompts: Record<RunnerRole, PromptRef | null>;
@@ -193,7 +193,7 @@ export async function companyExtras(db: Db, now = new Date()): Promise<CompanyEx
     facts[slug] = {
       goal: goalBy.get(slug) ?? null,
       in_flight: await r.count("tasks", { projectId: p.id, kind: "ticket", status: ["In progress", "In review"] }),
-      blocked: await r.count("tasks", { projectId: p.id, kind: "ticket", status: ["Blocked", "Needs Jorge"] }),
+      blocked: await r.count("tasks", { projectId: p.id, kind: "ticket", status: ["Blocked", "Needs owner"] }),
       last_move_at: iso(lastMove?.updatedAt ?? null),
       po: po ? { slug: po.slug, name: po.name } : null,
       last_run: poAgent ? briefOf(latestFor(poAgent.id, slug)) : null,
@@ -237,11 +237,11 @@ export async function projectSheet(db: Db, slug: string): Promise<ProjectSheet> 
     return t.ownerAgent ? ((await r.get("agents", { id: t.ownerAgent }))?.name ?? null) : null;
   };
   const inProgress = await r.find("tasks", { projectId: id, kind: "ticket", status: ["In progress", "In review"] }, { orderBy: [{ column: "updatedAt", desc: true }], limit: 6 });
-  const blocked = await r.find("tasks", { projectId: id, kind: "ticket", status: ["Blocked", "Needs Jorge"] }, { orderBy: [{ column: "updatedAt", desc: true }], limit: 6 });
+  const blocked = await r.find("tasks", { projectId: id, kind: "ticket", status: ["Blocked", "Needs owner"] }, { orderBy: [{ column: "updatedAt", desc: true }], limit: 6 });
   // Priority first with a missing one last (it sorted as P9, after P0..P3, the only priorities a write accepts),
   // then the oldest. Postgres sorts.
   const next = await r.find("tasks", { projectId: id, kind: "ticket", status: "Ready" }, { orderBy: [{ column: "priority" }, { column: "createdAt" }], limit: 5 });
-  // Jorge's: assigned to a human seat or to ceo.
+  // The owner's: assigned to a human seat or to ceo.
   const yours = async (t: Task): Promise<boolean> => {
     const a = t.ownerAgent ? await r.get("agents", { id: t.ownerAgent }) : undefined;
     return !!a && (a.kind === "human" || a.slug === "ceo");
@@ -261,7 +261,7 @@ export async function projectSheet(db: Db, slug: string): Promise<ProjectSheet> 
       return { stage, count: hit?.n ?? 0, newest: hit?.newest ?? null };
     }),
     in_progress: inProgressRows,
-    blocked: blocked.map((t) => ({ key: t.key, title: t.title, status: t.status, why: t.blockedNote || (t.status === "Needs Jorge" ? "te espera a ti" : "bloqueado") })),
+    blocked: blocked.map((t) => ({ key: t.key, title: t.title, status: t.status, why: t.blockedNote || (t.status === "Needs owner" ? "te espera a ti" : "bloqueado") })),
     next: nextRows,
     runs: runs.map((x) => runOf(x, slugOf.get(x.agentId)!, project.slug)),
     bot_work: (await botWorkBy(db)).get(project.slug) ?? 0,

@@ -1,5 +1,5 @@
 // PLA-I20-2: Won't do and reopening are a logged move. The screen sends a reason. An agent also
-// sends delegated_by_jorge. A raw status with neither is WONT_DO_WITHOUT_EVIDENCE. A granted
+// sends delegated_by_owner. A raw status with neither is WONT_DO_WITHOUT_EVIDENCE. A granted
 // historical row still covers the old decision. The inbox has no approval group.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -90,7 +90,7 @@ test("an agent without evidence is HUMAN_ONLY, and with evidence the move is lis
     version: created.version,
     reason: "él lo pidió",
     approval_id: "old-id",
-    delegated_by_jorge: { message_id: "msg-owner-9201", quote: QUOTE },
+    delegated_by_owner: { message_id: "msg-owner-9201", quote: QUOTE },
   });
   assert.equal(closed.status, "Won't do");
   assert.match(closed.hint, /ignored approval_id/);
@@ -111,7 +111,7 @@ test("a raw Won't do is flagged, and a granted historical row is not", async () 
       taskId: row.id,
       taskKey: old.key,
       type: "approval.archived",
-      actor: { agent: "jorge", session_id: "web", machine: "screen" },
+      actor: { agent: "owner", session_id: "web", machine: "screen" },
       payload: { approval_id: randomUUID(), action: "wont_do", state: "granted", reason: "ya se decidió" },
     }),
   );

@@ -2,6 +2,7 @@
 // from the screen only. Throwaway DB; gh is faked through releaseGh.run, so no real gh ever runs.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import { readFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { TEST_BEARER, resetTestStore, useTestEnv, type TestStore } from "./helpers.js";
@@ -130,6 +131,8 @@ test("I32-4 #1: aceptar on a PR merges it into sandbox with gh pr merge --merge 
   assert.deepEqual(merge, ["pr", "merge", "9", "--repo", "example/micasa", "--merge", "--match-head-commit", "f".repeat(40)]);
   const ev = (await store.get("events", { type: "pr.merged", taskKey: good.key }))!.payload;
   assert.deepEqual([ev.number, ev.base, ev.merge_sha, ev.by], [9, "sandbox", "a".repeat(40), "screen"]);
+  // PLA-82 (F-31): the step is Merged at once, not ~40 s later when the poller sees it.
+  assert.equal((await store.get("tasks", { key: good.key }))!.status, "Merged");
 
   calls.length = 0;
   const bad = await reviewTicket("Atajo a main", "code", { pr: "https://github.com/example/micasa/pull/10" });
@@ -145,6 +148,39 @@ test("I32-4 #1: aceptar on a PR merges it into sandbox with gh pr merge --merge 
   const failed = await act({ message_id: bad.message, action: "aceptar" });
   assert.equal(failed.status, 409);
   assert.equal(((await failed.json()) as { error: string }).error, "MERGE_FAILED");
+});
+
+// PLA-I68-3: Camino's rule for the branch (required checks) holds in Aceptar too, and a squash chosen there is used.
+test("I68-3: aceptar refuses while the branch's Camino rule names a check that is not green; squash once chosen in Camino", async () => {
+  const p = await store.projectId("micasa");
+  const config = { rules: { sandbox: { on: true, pr: true, nodel: true, agents: false } }, required_checks: { sandbox: ["check"] }, merge: { squash: true } } as never;
+  await store.fix(async (uow) => {
+    if (await uow.get("camino", { projectId: p })) await uow.update("camino", { projectId: p }, { config });
+    else await uow.insert("camino", { projectId: p, config });
+  });
+  let conclusion = "FAILURE";
+  const calls: string[][] = [];
+  releaseGh.run = async (args) => {
+    calls.push(args);
+    const n = args[2]!;
+    if (args[1] === "view" && args.includes("baseRefName,state,headRefOid,url")) return { ok: true, stdout: JSON.stringify({ baseRefName: "sandbox", state: "OPEN", headRefOid: "f".repeat(40), url: `https://github.com/example/micasa/pull/${n}` }), stderr: "" };
+    if (args[1] === "view" && args.includes("statusCheckRollup")) return { ok: true, stdout: JSON.stringify({ statusCheckRollup: [{ name: "check", conclusion }] }), stderr: "" };
+    if (args[1] === "view" && args.includes("mergeable")) return { ok: true, stdout: JSON.stringify({ mergeable: "MERGEABLE" }), stderr: "" };
+    if (args[1] === "merge") return { ok: true, stdout: "", stderr: "" };
+    if (args[1] === "view") return { ok: true, stdout: JSON.stringify({ mergeCommit: { oid: "c".repeat(40) }, url: `https://github.com/example/micasa/pull/${n}` }), stderr: "" };
+    return { ok: false, stdout: "", stderr: "unexpected" };
+  };
+  const t = await reviewTicket("Con regla", "code", { pr: "https://github.com/example/micasa/pull/31" });
+  const refused = await act({ message_id: t.message, action: "fusionar" });
+  assert.equal(refused.status, 409);
+  const body = (await refused.json()) as { error: string; checks: string[] };
+  assert.deepEqual([body.error, body.checks], ["CAMINO_RULE_BLOCKS", ["check"]]);
+  assert.equal(calls.some((a) => a[1] === "merge"), false);
+  conclusion = "SUCCESS";
+  const res = await act({ message_id: t.message, action: "fusionar" });
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.ok(calls.find((a) => a[1] === "merge")!.includes("--squash"));
+  await store.fix((uow) => uow.delete("camino", { projectId: p }));
 });
 
 test("a PR already merged into sandbox (another card, or GitHub) is the accept itself, not an error; closed unmerged is refused in words", async () => {
@@ -204,4 +240,69 @@ test("I32-4 #2: a runner's question lands in the thread with Responder; responde
   assert.equal(q.answer, "Plan Inicial");
   assert.ok(q.answeredAt);
   assert.deepEqual((await messages()).find((x) => x.id === m.id)!.actions, []);
+});
+
+// The Taller that works micasa's steps: its own team's, else a company-level one.
+async function micasaTaller(): Promise<string> {
+  const micasa = await store.projectId("micasa");
+  const tallers = (await store.find("agents", { roleTemplate: "taller" })).filter((a) => a.projectId === micasa || a.projectId === null);
+  return (tallers.find((a) => a.projectId === micasa) ?? tallers[0]!).slug;
+}
+// Every run gone (their lock rows with them: the store has no foreign key to cascade).
+const clearRuns = () =>
+  store.fix(async (uow) => {
+    await uow.delete("runLocks", {});
+    await uow.delete("agentRuns", {});
+  });
+const runsOf = async (slug: string, key: string) => {
+  const agent = await store.get("agents", { slug });
+  return agent ? store.find("agentRuns", { agentId: agent.id, taskKey: key }) : [];
+};
+
+test("PLA-108: a PR that conflicts with sandbox is not merged; the delivery goes back to its Taller with the instruction and the owner is told in words", async () => {
+  const taller = await micasaTaller();
+  const calls: string[][] = [];
+  releaseGh.run = async (args) => {
+    calls.push(args);
+    if (args[1] === "view" && args.includes("baseRefName,state,headRefOid,url")) return { ok: true, stdout: JSON.stringify({ baseRefName: "sandbox", state: "OPEN", headRefOid: "f".repeat(40), url: "https://github.com/example/micasa/pull/12" }), stderr: "" };
+    if (args[1] === "view" && args.includes("mergeable")) return { ok: true, stdout: JSON.stringify({ mergeable: "CONFLICTING" }), stderr: "" };
+    return { ok: false, stdout: "", stderr: "unexpected" };
+  };
+  await clearRuns();
+  const t = await reviewTicket("Mover una cita", "code", { pr: "https://github.com/example/micasa/pull/12", owner: taller });
+  const res = await act({ message_id: t.message, action: "fusionar" });
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as { error: string; hint: string };
+  assert.equal(body.error, "MERGE_CONFLICT");
+  assert.match(body.hint, /volvió a Taller/);
+  assert.equal(calls.some((a) => a[1] === "merge"), false, "nothing merged");
+  assert.equal((await store.get("tasks", { key: t.key }))!.status, "Ready");
+  const [noteEvent] = await store.find("events", { type: "note", taskKey: t.key }, { orderBy: [{ column: "id", desc: true }], limit: 1 });
+  const note = noteEvent!.payload.text as string;
+  assert.match(note, /choca con la rama de trabajo/);
+  const run = await runsOf(taller, t.key);
+  assert.equal(run.length, 1, "one run for Taller");
+  assert.match(run[0]!.reason ?? "", /Merge origin\/sandbox into the branch/);
+  // The screen's words for it.
+  // PLA-I2-10: Compañía's thread words moved to lib/compania-words.ts.
+  for (const f of ["../ui/src/lib/acts-words.ts", "../ui/src/lib/compania-words.ts"]) {
+    assert.match(await readFile(new URL(f, import.meta.url), "utf8"), /MERGE_CONFLICT: "Choca con lo último que aceptaste/);
+  }
+});
+
+test("PLA-108: mergeable UNKNOWN, then gh merge says «not mergeable»: the same conflict, back to Taller", async () => {
+  const taller = await micasaTaller();
+  releaseGh.run = async (args) => {
+    if (args[1] === "view" && args.includes("baseRefName,state,headRefOid,url")) return { ok: true, stdout: JSON.stringify({ baseRefName: "sandbox", state: "OPEN", headRefOid: "f".repeat(40), url: "https://github.com/example/micasa/pull/13" }), stderr: "" };
+    if (args[1] === "view" && args.includes("mergeable")) return { ok: true, stdout: JSON.stringify({ mergeable: "UNKNOWN" }), stderr: "" };
+    if (args[1] === "merge") return { ok: false, stdout: "", stderr: "X Pull request example/micasa#13 is not mergeable: the merge commit cannot be cleanly created." };
+    return { ok: false, stdout: "", stderr: "unexpected" };
+  };
+  await clearRuns();
+  const t = await reviewTicket("Cancelar una cita", "code", { pr: "https://github.com/example/micasa/pull/13", owner: taller });
+  const res = await act({ message_id: t.message, action: "fusionar" });
+  assert.equal(res.status, 409);
+  assert.equal(((await res.json()) as { error: string }).error, "MERGE_CONFLICT");
+  assert.equal((await store.get("tasks", { key: t.key }))!.status, "Ready");
+  assert.equal((await runsOf(taller, t.key)).length, 1);
 });

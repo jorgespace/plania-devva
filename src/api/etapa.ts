@@ -7,7 +7,7 @@
 //
 // The rules, first match wins (Design doc of PLA-I53; the initiative's table where the doc says nothing):
 //   Done → hecho · Released → publicado · Merged → integrado · Won't do → null (no stage)
-//   Needs Jorge → te_toca
+//   Needs owner → te_toca
 //   Blocked → en_espera when only unfinished tickets hold it, else bloqueado (reason: blocked_note, else the blocker)
 //   In review →
 //     a QA run is running, or the latest QA lane is checking/reviewing → en_qa running
@@ -32,15 +32,21 @@ import { isDeepStrictEqual } from "node:util";
 import type { Db } from "../db/client.js";
 import type { Actor, Agent, Project, QaLane } from "../db/schema.js";
 import { SETTLED_STATUSES } from "../mcp/blockers.js";
-import { isGating } from "../mcp/jorge-lines.js";
+import { isGating } from "../mcp/owner-lines.js";
 import { roleOf } from "../runner/limits.js";
 import { readerOf } from "../store/port.js";
 import { ne, notNull, type Reader, type Row } from "../store/types.js";
 import { qaAgentOf, qaTicket, sameCommit } from "../runner/qa.js";
 import { probadorGate } from "../captures/probador.js";
-import { JORGE } from "../runner/threads.js";
+import { OWNER_AUTHOR } from "../runner/threads.js";
 import { byKey } from "./company-plan.js";
 import { zonasOf, type Zona } from "./zonas.js";
+import { failReason, startFailureOf } from "../runner/start-failures.js";
+import { SIGNED_OUT } from "../runner/signed-out.js";
+import { defineWords, say } from "../words.js";
+import { isRunSession, sessionsOf } from "../runner/run-session.js";
+import { projectTurns } from "../state/turn-facts.js";
+import type { TurnOrNobody } from "../state/turn.js";
 
 export const ETAPAS = ["despues", "lista", "en_espera", "pospuesto", "bloqueado", "construyendo", "devuelto", "sin_dueno", "en_qa", "en_revision", "te_toca", "integrado", "publicado", "hecho"] as const;
 export type EtapaId = (typeof ETAPAS)[number];
@@ -89,10 +95,67 @@ export type EtapaFacts = {
   delivery: { returned: boolean; open: boolean; at: Date } | null;
   // PLA-52: El Probador has not finished the delivery's pictures (probadorGate, the rule the delivery card reads).
   photos?: boolean;
+  // PLA-158 (F-27): what that pass waits on (probador.waiting), so the board line says it instead of only «toma las fotos».
+  photosWaiting?: string | null;
 };
 
+// PLA-I2-10: each stage's reason in the install's language; the Spanish is unchanged.
+export const ETAPA_WORDS = defineWords({
+  es: {
+    quote: (s: string) => `«${s}»`,
+    needsDecision: "Necesita tu decisión.",
+    waitsFor: (q: string) => `Espera a ${q}`,
+    qaQueued: "En la cola de QA.",
+    qaReturned: "QA encontró fallas y la devolvió.",
+    qaAgain: "QA encontró fallas otra vez: revísala tú.",
+    qaError: "QA no pudo terminar: revísala tú.",
+    ciFail: "Las pruebas del PR fallan.",
+    ciRun: "Las pruebas del PR corren.",
+    photos: "Plania toma las fotos de la entrega.",
+    delivered: "Entregada: espera que la aceptes.",
+    prClosed: "El PR se cerró sin fusionar.",
+    returnedLapsed: "La devolvieron y nadie la está arreglando: la reserva venció.",
+    nobody: "Nadie la tiene: la reserva venció y no corre ningún paso.",
+    returned: "La devolvieron: espera que la arreglen.",
+    postponed: "Pospuesto a propósito.",
+    backlog: "Está en Backlog: nadie la pasó a Lista.",
+    humanAction: "Espera una acción tuya.",
+    until: (at: string) => `Espera hasta ${at}`,
+    env: (env: string, cond: string, value: string) => `Espera a ${env}: ${cond} ${value}`,
+    envFlag: (flag: string, env: string) => `Espera la bandera ${flag} en ${env}`,
+    metric: (name: string, value: string) => `Espera que ${name} llegue a ${value}`,
+    blocked: "Bloqueado.",
+  },
+  en: {
+    quote: (s: string) => `“${s}”`,
+    needsDecision: "Needs your decision.",
+    waitsFor: (q: string) => `Waits for ${q}`,
+    qaQueued: "In the QA queue.",
+    qaReturned: "QA found failures and sent it back.",
+    qaAgain: "QA found failures again: review it yourself.",
+    qaError: "QA could not finish: review it yourself.",
+    ciFail: "The PR's tests fail.",
+    ciRun: "The PR's tests are running.",
+    photos: "Plania is taking the delivery's pictures.",
+    delivered: "Delivered: waits for you to accept it.",
+    prClosed: "The PR was closed without merging.",
+    returnedLapsed: "It was sent back and nobody is fixing it: the hold expired.",
+    nobody: "Nobody has it: the hold expired and no step is running.",
+    returned: "It was sent back: waits to be fixed.",
+    postponed: "Postponed on purpose.",
+    backlog: "It is in Backlog: nobody moved it to Ready.",
+    humanAction: "Waits for an action of yours.",
+    until: (at: string) => `Waits until ${at}`,
+    env: (env: string, cond: string, value: string) => `Waits for ${env}: ${cond} ${value}`,
+    envFlag: (flag: string, env: string) => `Waits for the flag ${flag} in ${env}`,
+    metric: (name: string, value: string) => `Waits for ${name} to reach ${value}`,
+    blocked: "Blocked.",
+  },
+});
+const ew = () => say(ETAPA_WORDS);
+
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
-const quoted = (s: string, n = 60) => `«${s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s}»`;
+const quoted = (s: string, n = 60) => ew().quote(s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const ciOf = (pr: EtapaFacts["pr"]): Ci | null => {
   if (!pr) return null;
   const c = pr.ci;
@@ -118,32 +181,32 @@ export function etapaOf(f: EtapaFacts, now: Date): Etapa | null {
       return make("integrado");
     case "Won't do":
       return null;
-    case "Needs Jorge":
-      return make("te_toca", { holder: { ...JORGE }, reason: "Necesita tu decisión." });
+    case "Needs owner":
+      return make("te_toca", { holder: { ...OWNER_AUTHOR }, reason: ew().needsDecision });
     case "Blocked":
-      if (!f.held && f.waitsOn.length > 0) return make("en_espera", { reason: `Espera a ${quoted(f.waitsOn[0]!)}` });
-      return make("bloqueado", { reason: f.blockedNote || f.held || (f.waitsOn[0] ? `Espera a ${quoted(f.waitsOn[0])}` : null) });
+      if (!f.held && f.waitsOn.length > 0) return make("en_espera", { reason: ew().waitsFor(quoted(f.waitsOn[0]!)) });
+      return make("bloqueado", { reason: f.blockedNote || f.held || (f.waitsOn[0] ? ew().waitsFor(quoted(f.waitsOn[0])) : null) });
     case "In review": {
       if ((f.run && f.run.holder.role === "qa") || (lane && QA_RUNNING.includes(lane.status))) {
         return make("en_qa", { qa: "running", holder: f.run?.holder ?? { agent: "qa", role: "qa" }, live: true, since: iso(f.run?.since ?? lane?.startedAt ?? lane?.createdAt) ?? at });
       }
       const stale = !!lane && !!f.pr?.head && !!lane.commit && !sameCommit(f.pr.head, lane.commit);
       if (f.qa.applies && (!lane || lane.status === "queued" || stale)) {
-        return make("en_qa", { qa: "queued", holder: { agent: "qa", role: "qa" }, since: iso(lane && !stale ? lane.createdAt : null) ?? at, reason: "En la cola de QA." });
+        return make("en_qa", { qa: "queued", holder: { agent: "qa", role: "qa" }, since: iso(lane && !stale ? lane.createdAt : null) ?? at, reason: ew().qaQueued });
       }
       if (lane?.status === "fail") {
-        if (lane.returned || lane.attempt === 1) return make("devuelto", { holder: worker?.holder ?? f.owner, live: !!worker, since: iso(lane.endedAt) ?? at, reason: "QA encontró fallas y la devolvió." });
-        return make("te_toca", { holder: { ...JORGE }, since: iso(lane.endedAt) ?? at, reason: "QA encontró fallas otra vez: revísala tú." });
+        if (lane.returned || lane.attempt === 1) return make("devuelto", { holder: worker?.holder ?? f.owner, live: !!worker, since: iso(lane.endedAt) ?? at, reason: ew().qaReturned });
+        return make("te_toca", { holder: { ...OWNER_AUTHOR }, since: iso(lane.endedAt) ?? at, reason: ew().qaAgain });
       }
-      if (lane?.status === "error") return make("te_toca", { holder: { ...JORGE }, since: iso(lane.endedAt) ?? at, reason: "QA no pudo terminar: revísala tú." });
+      if (lane?.status === "error") return make("te_toca", { holder: { ...OWNER_AUTHOR }, since: iso(lane.endedAt) ?? at, reason: ew().qaError });
       if (f.pr?.state === "merged") return make("integrado");
       if (f.pr?.state === "open" && (ci === "pending" || ci === "failure")) {
-        return make("en_revision", { reason: ci === "failure" ? "Las pruebas del PR fallan." : "Las pruebas del PR corren." });
+        return make("en_revision", { reason: ci === "failure" ? ew().ciFail : ew().ciRun });
       }
       // PLA-52: no card is raised before the pictures exist, so it is not the owner's turn yet either.
-      if (f.delivery?.open && f.photos) return make("en_revision", { since: iso(f.delivery.at) ?? at, reason: "Plania toma las fotos de la entrega." });
-      if (f.delivery?.open) return make("te_toca", { holder: { ...JORGE }, since: iso(f.delivery.at) ?? at, reason: "Entregada: espera que la aceptes." });
-      return make("en_revision", { reason: f.pr?.state === "closed" ? "El PR se cerró sin fusionar." : null });
+      if (f.delivery?.open && f.photos) return make("en_revision", { since: iso(f.delivery.at) ?? at, reason: f.photosWaiting ? `${ew().photos} ${f.photosWaiting}` : ew().photos });
+      if (f.delivery?.open) return make("te_toca", { holder: { ...OWNER_AUTHOR }, since: iso(f.delivery.at) ?? at, reason: ew().delivered });
+      return make("en_revision", { reason: f.pr?.state === "closed" ? ew().prClosed : null });
     }
   }
 
@@ -151,23 +214,23 @@ export function etapaOf(f: EtapaFacts, now: Date): Etapa | null {
   const sentBack = !!f.delivery?.returned || (!!lane && lane.status === "fail" && lane.returned);
   const sentAt = iso(f.delivery?.returned ? f.delivery.at : lane?.endedAt) ?? at;
   if (f.status === "In progress" && !worker) {
-    return make("sin_dueno", { since: iso(f.lease?.until) ?? at, reason: sentBack ? "La devolvieron y nadie la está arreglando: la reserva venció." : "Nadie la tiene: la reserva venció y no corre ningún paso." });
+    return make("sin_dueno", { since: iso(f.lease?.until) ?? at, reason: sentBack ? ew().returnedLapsed : ew().nobody });
   }
   if (sentBack && (f.status === "Ready" || worker)) {
-    return make("devuelto", { holder: worker?.holder ?? f.owner, live: !!worker, since: worker?.since ?? sentAt, reason: worker ? null : "La devolvieron: espera que la arreglen." });
+    return make("devuelto", { holder: worker?.holder ?? f.owner, live: !!worker, since: worker?.since ?? sentAt, reason: worker ? null : ew().returned });
   }
   if (worker) return make("construyendo", { holder: worker.holder, live: true, since: worker.since });
   if (f.status === "Ready") {
-    if (f.postponed) return make("pospuesto", { reason: "Pospuesto a propósito." });
+    if (f.postponed) return make("pospuesto", { reason: ew().postponed });
     if (f.held) return make("bloqueado", { reason: f.held });
-    if (f.waitsOn.length > 0) return make("en_espera", { reason: `Espera a ${quoted(f.waitsOn[0]!)}` });
+    if (f.waitsOn.length > 0) return make("en_espera", { reason: ew().waitsFor(quoted(f.waitsOn[0]!)) });
     return make("lista");
   }
   // PLA-47: a ticket left for later says why it waits, so the floor can name what is next.
   if (f.status === "Backlog") {
     // A postponed step that waits on another says so: that is what is next, not the postponing.
-    if (f.postponed) return make("pospuesto", { reason: f.waitsOn.length > 0 ? `Espera a ${quoted(f.waitsOn[0]!)}` : "Pospuesto a propósito." });
-    return make("despues", { reason: f.waitsOn.length > 0 ? `Espera a ${quoted(f.waitsOn[0]!)}` : "Está en Backlog: nadie la pasó a Lista." });
+    if (f.postponed) return make("pospuesto", { reason: f.waitsOn.length > 0 ? ew().waitsFor(quoted(f.waitsOn[0]!)) : ew().postponed });
+    return make("despues", { reason: f.waitsOn.length > 0 ? ew().waitsFor(quoted(f.waitsOn[0]!)) : ew().backlog });
   }
   // An unknown status reads as not started.
   return make("despues");
@@ -179,12 +242,24 @@ export const isAhora = (e: Etapa | null) => !!e && (e.etapa === "construyendo" |
 export type AhoraItem = { key: string; title: string; initiative: string | null } & Pick<Etapa, "etapa" | "qa" | "holder" | "live" | "since" | "reason">;
 
 // zonas (PLA-I53-6): what part of the app the ticket touches, from its areas (src/api/zonas.ts); [] with no areas.
-export type ProjectTicket = { key: string; title: string; status: string; phase: number | null; parent_key: string | null; etapa: Etapa; zonas: Zona[] };
+// NEWPROJ-5: arranque, when the step's newest run failed before its process started (src/runner/start-failures.ts):
+// the run's summary and when it ended. Null otherwise, and once a newer run is queued, runs or ends.
+export type Arranque = { summary: string; at: string | null };
+// PLA-I3-1: what the runner measured on a ticket or an initiative (agent_runs, never the self-reported token_usage).
+// used is input + output, the figure the screen shows; the prompt cache is kept apart (cache_read, cache_write) since
+// it costs a fraction of fresh tokens. runs counts the runs summed, of any status.
+export type Tokens = { used: number; cache_read: number; cache_write: number; runs: number };
+export const NO_TOKENS: Tokens = Object.freeze({ used: 0, cache_read: 0, cache_write: 0, runs: 0 }) as Tokens;
+export const addTokens = (a: Tokens, b: Tokens): Tokens => ({ used: a.used + b.used, cache_read: a.cache_read + b.cache_read, cache_write: a.cache_write + b.cache_write, runs: a.runs + b.runs });
+// PLA-I74-5: turn, whose turn the step is (src/state/turn.ts); the board's working/queued/waiting text reads it.
+export type ProjectTicket = { key: string; title: string; status: string; phase: number | null; parent_key: string | null; etapa: Etapa; zonas: Zona[]; arranque: Arranque | null; tokens: Tokens; turn?: TurnOrNobody };
 // A completed initiative (Done), for the board's folded line: no tickets.
 export type DoneInitiative = { key: string; title: string; done_at: string | null };
 // PLA-I56-1: done counts landed tickets (Merged, Released, Done); closed only Done. can_close: every ticket is Done,
 // so the owner's Cerrar is accepted (the server refuses an initiative with an open ticket). version for that write.
-export type OpenInitiative = { key: string; title: string; status: string; done: number; total: number; closed: number; can_close: boolean; version: number; tickets: ProjectTicket[] };
+// PLA-I3-1: tokens rolls up every ticket under it (Won't do too: those tokens were spent), the runs on the initiative's
+// own key, and the runs on the ideas promoted to it (tokensOfInitiative).
+export type OpenInitiative = { key: string; title: string; status: string; done: number; total: number; closed: number; can_close: boolean; version: number; tokens: Tokens; tickets: ProjectTicket[] };
 export type ProjectEtapas = {
   // Every ticket of the project but Won't do, by key.
   byTicket: Map<string, ProjectTicket>;
@@ -262,12 +337,48 @@ async function typedHoldsIn(r: Reader, projectId: string, now: Date): Promise<(b
   };
 }
 
+// PLA-I3-1: the measured tokens of every task of one project (tickets, initiatives, ideas), by task id, in one query.
+// A run counts toward the task its task_key names, through the task's key or a former key (task_aliases). Only runs
+// whose work key is task:<KEY> count: a run keyed general (Asistente, the PO's cadence) or consulta:<id> (a question
+// the owner asked, even one about a ticket) belongs to no ticket and is left out of every sum.
+export async function projectTokens(db: Db, projectId: string): Promise<Map<string, Tokens>> {
+  const r = readerOf(db);
+  const runs = (await r.find("agentRuns", { projectId, taskKey: notNull() })).filter((x) => x.workKey.startsWith("task:"));
+  const out = new Map<string, Tokens>();
+  if (runs.length === 0) return out;
+  const keys = [...new Set(runs.map((x) => x.taskKey!))];
+  // The task's key first, else a former key's task (coalesce(t.id, al.task_id)).
+  const idByKey = new Map((await r.find("tasks", { projectId, key: keys })).map((t) => [t.key, t.id]));
+  const aliasByKey = new Map((await r.find("taskAliases", { projectId, alias: keys })).map((a) => [a.alias, a.taskId]));
+  for (const x of runs) {
+    const id = idByKey.get(x.taskKey!) ?? aliasByKey.get(x.taskKey!);
+    if (id == null) continue; // a key no task has (a deleted ticket): nothing to show it on
+    out.set(id, addTokens(out.get(id) ?? NO_TOKENS, { used: x.inputTokens + x.outputTokens, cache_read: x.cacheReadTokens, cache_write: x.cacheCreateTokens, runs: 1 }));
+  }
+  return out;
+}
+
+// PLA-I3-1: an initiative's tokens: its own key's runs, every ticket under it, and every idea promoted to it.
+export function tokensOfInitiative(byId: Map<string, Tokens>, initiativeId: string, ticketIds: string[], ideaIds: string[]): Tokens {
+  return [initiativeId, ...ticketIds, ...ideaIds].reduce((acc, id) => addTokens(acc, byId.get(id) ?? NO_TOKENS), NO_TOKENS);
+}
+
 // Every ticket's stage in one project, from a fixed number of reads whatever the number of tickets.
 export async function projectEtapas(db: Db, p: Project, now = new Date()): Promise<ProjectEtapas> {
   const r = readerOf(db);
   const all = await r.find("tasks", { projectId: p.id, kind: ["ticket", "initiative"] });
   const initiatives = all.filter((t) => t.kind === "initiative");
   const tickets = all.filter((t) => t.kind === "ticket" && t.status !== "Won't do");
+  // PLA-I3-1: tokens by task id, and which ideas were promoted to which initiative (by the initiative's key).
+  const tokensBy = await projectTokens(db, p.id);
+  const promotedIdeas = (await r.find("tasks", { projectId: p.id, kind: "idea", promotedTo: notNull() })).map((t) => ({ id: t.id, to: t.promotedTo }));
+  const initiativeTokens = (i: (typeof all)[number]) =>
+    tokensOfInitiative(
+      tokensBy,
+      i.id,
+      all.filter((t) => t.kind === "ticket" && t.parentId === i.id).map((t) => t.id),
+      promotedIdeas.filter((d) => d.to === i.key).map((d) => d.id),
+    );
   const parentOf = new Map(initiatives.map((i) => [i.id, i]));
   const open = initiatives.filter((t) => OPEN_INITIATIVE.includes(t.status)).sort(byKey);
   const here = open.filter((t) => t.status === "Active").at(-1) ?? null;
@@ -278,7 +389,7 @@ export async function projectEtapas(db: Db, p: Project, now = new Date()): Promi
     .filter((i) => i.status === "Done")
     .sort((a, b) => landedAt(b) - landedAt(a) || a.key.localeCompare(b.key))
     .map((i) => ({ key: i.key, title: i.title, done_at: iso(i.resolvedAt ?? i.statusChangedAt) }));
-  const empty: ProjectEtapas = { byTicket: new Map(), initiatives: open.map((i) => ({ key: i.key, title: i.title, status: i.status, done: 0, total: 0, closed: 0, can_close: false, version: i.version, tickets: [] })), loose: [], loose_done: 0, loose_done_title: null, done_initiatives, ahora: [] };
+  const empty: ProjectEtapas = { byTicket: new Map(), initiatives: open.map((i) => ({ key: i.key, title: i.title, status: i.status, done: 0, total: 0, closed: 0, can_close: false, version: i.version, tokens: initiativeTokens(i), tickets: [] })), loose: [], loose_done: 0, loose_done_title: null, done_initiatives, ahora: [] };
   if (ids.length === 0) return empty;
 
   // The running run on each ticket: the latest started (never started last), with its agent's slug.
@@ -288,6 +399,16 @@ export async function projectEtapas(db: Db, p: Project, now = new Date()): Promi
   for (const x of running.sort((a, b) => (a.startedAt ? 0 : 1) - (b.startedAt ? 0 : 1) || (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0))) {
     const slug = runSlug.get(x.agentId);
     if (slug !== undefined && !runBy.has(x.taskKey!)) runBy.set(x.taskKey!, { slug, role: x.role, startedAt: x.startedAt });
+  }
+  // PLA-I74-5 (PLA-167): a lease a runner run holds is live only while that run is; one an ended run left is nobody's.
+  const liveSessions = new Set((await r.find("agentRuns", { status: ["starting", "running"] })).flatMap((x) => sessionsOf(x.id)));
+  // NEWPROJ-5: each step's newest run of any state, to tell a step whose run could not start (the latest ended, else
+  // started, else queued; then the latest queued).
+  const lastAt = (x: Row<"agentRuns">) => (x.endedAt ?? x.startedAt ?? x.queuedAt).getTime();
+  const newestBy = new Map<string, Row<"agentRuns">>();
+  for (const x of await r.find("agentRuns", { projectId: p.id, taskKey: notNull() })) {
+    const had = newestBy.get(x.taskKey!);
+    if (!had || lastAt(x) > lastAt(had) || (lastAt(x) === lastAt(had) && x.queuedAt > had.queuedAt)) newestBy.set(x.taskKey!, x);
   }
   // The latest QA lane of each ticket (two made in the same millisecond: the one written last).
   const laneBy = new Map<string, QaLane>();
@@ -320,7 +441,7 @@ export async function projectEtapas(db: Db, p: Project, now = new Date()): Promi
   for (const b of await r.find("blockers", { taskId: ids }, { orderBy: [{ column: "createdAt" }] })) if (isGating(b.spec) && !(await holds(b))) typed.push(b);
   // The latest message to the owner that links each ticket (deliveries; questions and proposals are not).
   const threadIds = (await r.find("threads", { projectId: p.id })).map((th) => th.id);
-  const messages = threadIds.length ? await r.find("threadMessages", { threadId: threadIds, authorAgent: ne(JORGE.agent), questionId: null, proposal: null }) : [];
+  const messages = threadIds.length ? await r.find("threadMessages", { threadId: threadIds, authorAgent: ne(OWNER_AUTHOR.agent), questionId: null, proposal: null }) : [];
   const deliveryBy = new Map<string, { actionState: Row<"threadMessages">["actionState"]; at: Date }>();
   for (const m of messages) {
     for (const l of m.links ?? []) {
@@ -336,6 +457,10 @@ export async function projectEtapas(db: Db, p: Project, now = new Date()): Promi
 
   const byIdAgent = new Map(roster.map((a) => [a.id, a]));
   const bySlug = new Map(roster.map((a) => [a.slug, a]));
+  const arranqueBy = new Map<string, Arranque>();
+  // PLA-I2-16: Claude signed out on this machine also waits on the owner (the run started but did nothing), so it shows
+  // the same way, with its own words (ui/src/lib/arranque.ts).
+  for (const x of newestBy.values()) if (x.status === "fail" && (startFailureOf(x.summary) || failReason(x.summary) === SIGNED_OUT)) arranqueBy.set(x.taskKey!, { summary: x.summary, at: iso(x.endedAt) });
   const waitBy = new Map<string, string[]>();
   for (const w of waits) waitBy.set(w.taskId, [...(waitBy.get(w.taskId) ?? []), w.b.title]);
   const heldBy = new Map<string, string>();
@@ -357,7 +482,7 @@ export async function projectEtapas(db: Db, p: Project, now = new Date()): Promi
       status: t.status,
       statusChangedAt: t.statusChangedAt ?? t.createdAt,
       owner,
-      lease: actor && t.leaseUntil ? { holder: leaseAgent ? { agent: leaseAgent.slug, role: roleOf(leaseAgent) ?? leaseAgent.role } : { agent: actor.agent, role: owner.role }, since: t.claimedAt ?? null, until: t.leaseUntil } : null,
+      lease: actor && t.leaseUntil && !(isRunSession(actor.session_id) && !liveSessions.has(actor.session_id)) ? { holder: leaseAgent ? { agent: leaseAgent.slug, role: roleOf(leaseAgent) ?? leaseAgent.role } : { agent: actor.agent, role: owner.role }, since: t.claimedAt ?? null, until: t.leaseUntil } : null,
       run: run ? { holder: { agent: run.slug, role: run.role }, since: run.startedAt } : null,
       qa: {
         applies: qaOn && qaTicket(t),
@@ -374,9 +499,16 @@ export async function projectEtapas(db: Db, p: Project, now = new Date()): Promi
         ((parent.id === here?.id && t.status === "Backlog" && t.statusChangedAt !== null) || (parent.status === "On hold" && (t.status === "Backlog" || t.status === "Ready"))),
       delivery: d ? { returned: action === "cambios", open: !action, at: d.at } : null,
       photos: !!pr && probadorGate(p, t, pr.headSha ?? null).pending,
+      photosWaiting: t.probador?.state === "tomando" ? (t.probador.waiting ?? null) : null,
     };
     const etapa = etapaOf(facts, now);
-    if (etapa) byTicket.set(t.key, { key: t.key, title: t.title, status: t.status, phase: t.phase ?? null, parent_key: parent?.key ?? null, etapa, zonas: zonasOf(t.areas) });
+    if (etapa) byTicket.set(t.key, { key: t.key, title: t.title, status: t.status, phase: t.phase ?? null, parent_key: parent?.key ?? null, etapa, zonas: zonasOf(t.areas), arranque: arranqueBy.get(t.key) ?? null, tokens: tokensBy.get(t.id) ?? NO_TOKENS });
+  }
+
+  // PLA-I74-5: whose turn each step is.
+  for (const it of await projectTurns(db, p, byTicket, now)) {
+    const row = byTicket.get(it.key);
+    if (row) row.turn = it.turn;
   }
 
   const keyNo = (k: string) => Number(/(\d+)$/.exec(k)?.[1] ?? Number.MAX_SAFE_INTEGER);
@@ -389,7 +521,7 @@ export async function projectEtapas(db: Db, p: Project, now = new Date()): Promi
     initiatives: open.map((i) => {
       const mine = sorted.filter((t) => ticketParent.get(t.key) === i.id);
       const closed = mine.filter((t) => t.status === "Done").length;
-      return { key: i.key, title: i.title, status: i.status, done: mine.filter((t) => DONE.includes(t.status)).length, total: mine.length, closed, can_close: mine.length > 0 && closed === mine.length, version: i.version, tickets: mine };
+      return { key: i.key, title: i.title, status: i.status, done: mine.filter((t) => DONE.includes(t.status)).length, total: mine.length, closed, can_close: mine.length > 0 && closed === mine.length, version: i.version, tokens: initiativeTokens(i), tickets: mine };
     }),
     loose: sorted.filter((t) => !openIds.has(ticketParent.get(t.key) ?? "") && !DONE.includes(t.status)),
     loose_done: looseLanded.length,
@@ -401,10 +533,10 @@ export async function projectEtapas(db: Db, p: Project, now = new Date()): Promi
 
 // One line for an open typed blocker.
 function heldText(type: string, spec: Record<string, unknown>): string {
-  if (type === "human_action") return String(spec.text ?? "Espera una acción tuya.");
-  if (type === "time_after") return `Espera hasta ${String(spec.at ?? "")}`.trim();
-  if (type === "env") return `Espera a ${String(spec.env ?? "")}: ${String(spec.condition ?? "")} ${String(spec.value ?? "")}`.trim();
-  if (type === "env_flag") return `Espera la bandera ${String(spec.flag ?? "")} en ${String(spec.env ?? "")}`;
-  if (type === "metric_gte") return `Espera que ${String(spec.name ?? "")} llegue a ${String(spec.value ?? "")}`;
-  return "Bloqueado.";
+  if (type === "human_action") return String(spec.text ?? ew().humanAction);
+  if (type === "time_after") return ew().until(String(spec.at ?? "")).trim();
+  if (type === "env") return ew().env(String(spec.env ?? ""), String(spec.condition ?? ""), String(spec.value ?? "")).trim();
+  if (type === "env_flag") return ew().envFlag(String(spec.flag ?? ""), String(spec.env ?? ""));
+  if (type === "metric_gte") return ew().metric(String(spec.name ?? ""), String(spec.value ?? ""));
+  return ew().blocked;
 }

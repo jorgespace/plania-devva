@@ -15,7 +15,8 @@ const { waiveCheck } = await import("../src/mcp/checks.js");
 type Json = Record<string, any>;
 const A = { agent: "test-agent", session_id: "s1", machine: "ci" };
 const P = { project: "filmia" };
-const T = { scope: "s", checks: ["tests green", "screenshot at 375px"] };
+// PLA-I74-11: the second check is not visual, so an agent may waive it (a visual one is the QA lane's or the owner's).
+const T = { scope: "s", checks: ["tests green", "changelog entry written"] };
 
 let client: Client;
 let store: TestStore;
@@ -115,7 +116,7 @@ describe("Won't do", () => {
       status: "Won't do",
       version: await v(),
       reason: "superseded by FIL-I1-2",
-      delegated_by_jorge: { message_id: "msg-owner-9101", quote: "ciérralo, ya no hace falta" },
+      delegated_by_owner: { message_id: "msg-owner-9101", quote: "ciérralo, ya no hace falta" },
     });
     assert.equal(closed.status, "Won't do");
     assert.equal(await eventsOf("task.delegated_move"), 1);

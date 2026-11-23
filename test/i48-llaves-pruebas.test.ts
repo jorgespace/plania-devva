@@ -240,7 +240,7 @@ describe("Cómo probarla", () => {
     assert.equal(execs[0]!.cwd, PRUEBA);
     assert.equal(execs[0]!.stdin, `${r.body.password}\n${r.body.password}\n`);
     const again = await call("POST", "/api/projects/zigzag/maquinas/recorrido/contrasena");
-    assert.notEqual(again.body.password, r.body.password, "a new one each time; none is kept");
+    assert.notEqual(again.body.password, r.body.password, "a new one each time (PLA-I72-4 keeps the last one for the eye, outside the database)");
     const stored = JSON.stringify((await store.get("projects", { slug: "zigzag" }))!.settings);
     assert.ok(!stored.includes(r.body.password));
   });

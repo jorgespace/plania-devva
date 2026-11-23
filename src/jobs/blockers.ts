@@ -3,6 +3,7 @@ import { projectsWithChainedReady, promoteUnblocked } from "../mcp/blockers.js";
 import { SYSTEM_ACTOR, writeTx } from "../mcp/tx.js";
 import { readerOf } from "../store/port.js";
 import type { Job } from "./index.js";
+import { ST } from "../state/status.js";
 
 // time_after blockers are satisfied by the clock alone, so a job checks every 30 s for Blocked
 // tickets whose blockers all hold and moves them to Ready (promoteUnblocked does the rest).
@@ -11,7 +12,7 @@ import type { Job } from "./index.js";
 export async function promoteDue(db: Db, now = new Date()): Promise<number> {
   const r = readerOf(db);
   // The projects with a Blocked ticket whose time_after has come, each once.
-  const blocked = new Map((await r.find("tasks", { status: "Blocked" })).map((t) => [t.id, t]));
+  const blocked = new Map((await r.find("tasks", { status: ST.blocked })).map((t) => [t.id, t]));
   const due = blocked.size ? (await r.find("blockers", { taskId: [...blocked.keys()], type: "time_after" })).filter((b) => b.spec.at != null && new Date(String(b.spec.at)).getTime() <= now.getTime()) : [];
   // PLA-54: chain steps whose blockers landed while nothing promoted them (before PLA-54, or a raw write).
   const chained = await projectsWithChainedReady(db, now);

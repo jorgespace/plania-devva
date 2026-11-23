@@ -1,4 +1,4 @@
-// PLA-I29: what the Compañía page reads (one call), and the writes only Jorge's screen makes:
+// PLA-I29: what the Compañía page reads (one call), and the writes only the owner's screen makes:
 // the company and project switches and the runner's knobs. No token budgets (PLA-21).
 // No MCP tool reaches any of these writes.
 import type { Db } from "../db/client.js";
@@ -106,7 +106,7 @@ export async function companyState(db: Db, now = new Date()): Promise<CompanySta
 }
 
 // Off: no new runs, live runs get SIGINT. On again: project switches stay as they are,
-// so a project Jorge paused on its own stays paused.
+// so a project the owner paused on its own stays paused.
 export async function setCompanyPaused(db: Db, paused: boolean): Promise<{ paused: boolean; stopped: number }> {
   await loadSettings(db);
   await storeOf(db).write(COMPANY, {}, (uow) =>

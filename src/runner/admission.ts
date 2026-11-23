@@ -6,7 +6,7 @@
 //   lock keys  one live run per folder, branch and ticket (run_locks primary key).
 //   weights    each run's share of the 5-hour plan, from the motor it starts with, so admission can stop before
 //              the guard instead of after it.
-//   machine    free memory and disk on this Mac; a worker with a live run starts no more when either is low.
+//   machine    free memory and disk on this machine; a worker with a live run starts no more when either is low.
 import { execFile } from "node:child_process";
 import { statfs } from "node:fs/promises";
 import { freemem, hostname, platform, totalmem } from "node:os";
@@ -15,12 +15,14 @@ import type { Q } from "../mcp/tx.js";
 import { uowOf } from "../store/port.js";
 import { gt, lt, ne } from "../store/types.js";
 import { writeVia } from "./limits.js";
+import { defineWords, say } from "../words.js";
 
 // On main, the Postgres advisory lock admission took. The store's write queue is that lock now; kept for callers.
 export const ADMIT_LOCK = 7_600_017;
 export const LIVE = ["starting", "running"] as const;
 
-export type HeldCode = "project_cap" | "agent_cap" | "ceiling" | "machine" | "start_rate" | "plan" | "rest" | "lock" | "areas";
+// PLA-I71-3: seat_paused, the owner paused the seat (agents.paused_at); its runs wait until it is resumed.
+export type HeldCode = "project_cap" | "agent_cap" | "ceiling" | "machine" | "start_rate" | "plan" | "rest" | "lock" | "areas" | "seat_paused";
 
 export type Limits = { maxConcurrent: number; consultaSlots: number; maxPerAgent: number; serializeAreas: boolean };
 
@@ -170,17 +172,35 @@ export async function freeDiskGb(dir: string): Promise<number> {
 }
 
 // ---- the screen's words for a held run (Appendix C); the screen renders these, the API carries code + detail.
-export const HELD_TEXT: Record<HeldCode, string> = {
-  project_cap: "Esperando lugar en el proyecto",
-  agent_cap: "Esperando: este puesto ya hace lo que su tope permite",
-  ceiling: "Esperando lugar en la Mac",
-  machine: "La Mac está corta de memoria o disco",
-  start_rate: "Arrancando de a poco",
-  plan: "El plan va alto; sigue cuando baje",
-  rest: "Descansa entre corridas",
-  lock: "Espera a que termine el trabajo en la misma rama o ticket",
-  areas: "Espera: otro trabajo toca los mismos archivos",
-};
+// PLA-I2-10: in the install's language (heldText); the Spanish is unchanged.
+type HeldWords = Record<HeldCode, string>;
+export const HELD_WORDS = defineWords<HeldWords>({
+  es: {
+    project_cap: "Esperando lugar en el proyecto",
+    agent_cap: "Esperando: este puesto ya hace lo que su tope permite",
+    ceiling: "Esperando lugar en la máquina",
+    machine: "La máquina está corta de memoria o disco",
+    start_rate: "Arrancando de a poco",
+    plan: "El plan va alto; sigue cuando baje",
+    rest: "Descansa entre corridas",
+    lock: "Espera a que termine el trabajo en la misma rama o ticket",
+    areas: "Espera: otro trabajo toca los mismos archivos",
+    seat_paused: "En pausa: lo reanudas desde su ficha en Equipo",
+  },
+  en: {
+    project_cap: "Waiting for room in the project",
+    agent_cap: "Waiting: this seat is already doing as much as its limit allows",
+    ceiling: "Waiting for room on the machine",
+    machine: "The machine is short of memory or disk",
+    start_rate: "Starting a few at a time",
+    plan: "The plan is running high; it goes on when it comes down",
+    rest: "Resting between runs",
+    lock: "Waiting for the work on the same branch or ticket to finish",
+    areas: "Waiting: other work touches the same files",
+    seat_paused: "Paused: resume it from its panel in Equipo",
+  },
+});
+export const heldText = (code: HeldCode): string | null => say(HELD_WORDS)[code] ?? null;
 
 // Runs whose admission was lost (the process died between admitting and spawning): their lease ran out while
 // still `starting`. They end as fail and free their locks.

@@ -3,7 +3,7 @@
 // PLA-I32-6: GET /api/company and GET /api/company/projects/:slug serve the Plan's read contract
 // (src/api/company-org.ts); POST /api/company/projects/:slug/team {template} adds a team member; the runner's
 // plumbing (switches, guard, runs, log) is read from GET /api/machine. The writes below stay.
-// PLA-I29: the runner's screen routes. Jorge's session cookie only, like the delegation switch:
+// PLA-I29: the runner's screen routes. The owner's session cookie only, like the delegation switch:
 // a Bearer (any agent token) is 403 even with a cookie, no cookie is 401. No MCP tool writes these.
 //   GET  /api/company                      the Compañía read (switches, runs, plan reading)
 //   POST /api/company/switch               {paused}            company kill switch
@@ -15,53 +15,88 @@
 //   GET  /api/company/projects/:slug       the project sheet
 //   GET  /api/company/docs/:id             one role prompt doc (Prompt ↗); ?project=<slug>: any doc of that project (PLA-I47-1)
 //   GET  /api/company/projects/:slug/ficha La ficha's rows: ideas, PRs, docs, lienzos (PLA-I47-1)
+//   GET  /api/company/projects/:slug/pulso steps done per day, last 14 days (PLA-I64-3)
+//   GET  /api/company/projects/:slug/readiness  NEWPROJ-4: what a run needs, ready / missing / not_needed (src/runner/readiness.ts)
+//   GET  /api/company/projects/:slug/settings   NEWPROJ-6: the Ajustes view; PUT …/settings/{code,release,verify,context/:doc}
+//        writes through setProject and attachDoc (src/api/project-settings.ts)
+//   GET  /api/company/projects/:slug/hecho what landed day by day, ?hasta=&dias= (PLA-I64-6); …/ficha?todo=1 every doc and PR
 // PLA-I30-6/7: POST /api/company/projects/:slug/ask {text}  and  POST /api/company/projects/:slug/wake
 // PLA-I54-3/4: GET /api/company/projects/:slug/pedidos/:key and POST …/pedidos/:key/{guardar,restaurar,descartar,construir}.
 // PLA-I36-11: deleting a project needs the owner's code ({code}). src/auth/owner-code.ts.
 // PLA-21: no token budgets, so no limit to raise.
 //   GET  /api/company/owner-code          {enrolled}
 //   POST /api/company/owner-code/enroll   {password, code?} → {secret_base32, otpauth_uri} once
-//   DELETE /api/company/projects/:slug    {code}  the project and everything in it
+//   DELETE /api/company/projects/:slug    {code}  the project and everything in it; NEWPROJ-7: its live runs are stopped,
+//        its worktrees removed and its team deleted first → {deleted, stopped, worktrees, agents}
 // PLA-I46-12: skill packs (src/runner/packs.ts). A pack is a `Pack: <name>` doc; a role carries a list of slugs.
 //   GET  /api/company/packs                               → {packs: [{slug, name, when, doc_id}]}
 //   GET  /api/company/projects/:slug/team/:agent/packs    → {project, agent, packs: [{slug, name, when, doc_id}]}
-//   PUT  /api/company/projects/:slug/team/:agent/packs    {packs: [slug]} replaces the list → same shape
+//   PUT  /api/company/projects/:slug/team/:agent/packs    {packs: [slug], own?} replaces the list → same shape
+//        PLA-I67-1: packs is what the next run carries (the role's default kit when the seat lists none) and own says
+//        whether the seat has its own list; own: true with an empty list means the seat carries none (La estantería)
+//   GET  /api/company/projects/:slug/team/:agent/oficio   PLA-I67-1: the agent's page (src/api/company-oficio.ts)
 //        404 PROJECT_NOT_FOUND | AGENT_NOT_FOUND; 400 UNKNOWN_PACK {packs} | TOO_MANY_PACKS
 //   POST /api/company/projects/:slug/team                 {template, packs?, motor?} sets the new member's packs (and PLA-I59-2 motor) too
+//   PLA-I67-2: …/team/:agent/skills[/:skill[/state|rollback|duplicate|restore]], …/puesto and …/manner: the owner's
+//        skills and «tu manera» (src/api/company-oficio-skills.ts)
+//   PLA-I67-3: …/team/:agent/lessons[/:id[/decide]]: lessons, the teach bar's rule, the owner's verdicts
+//        (src/api/company-oficio-lessons.ts); a proposal also shows in Te toca as kind leccion (id l-<uuid>)
 //   PUT  /api/company/motores  {project, seats?, company?}  PLA-I59-2: the Motores console's save (src/api/company-motores.ts)
+import { pedirArreglo } from "./deploy-fix.js";
+import { caminoRoutes } from "./company-camino.js";
 import { Hono, type Context } from "hono";
 import { getCookie } from "hono/cookie";
 import { z } from "zod";
 import { SESSION_COOKIE, verifySession } from "../auth/session.js";
 import { withDb } from "../db/client.js";
+import { logoBytes, logosRead, refreshLogos } from "../brand/logos.js";
+import { marcaFile, marcaRead } from "../brand/marca.js";
 import { ToolError } from "../mcp/errors.js";
-import { createProjectFromTemplate } from "../runner/new-project.js";
+import { NEW_PROJECT_GOAL_MAX, NEW_PROJECT_NAME_MAX, createProjectFromTemplate } from "../runner/new-project.js";
+import { deleteProject } from "../runner/delete-project.js";
+import { defaultRepoCheckDeps, type RepoCheckDeps } from "../runner/repo-check.js";
+import { projectReadiness, type ReadinessDeps } from "../runner/readiness.js";
 import { listConsultas } from "../pedidos/consultas.js";
+import { repoSetupRoutes } from "./repo-setup.js";
+import { CONTEXT_DOC_IDS, putContextDoc, putLibraryDoc, setAdvanced, setCapture, setCodeLocation, setReleaseStep, setVerifyList, settingsRead, type ContextDocId } from "./project-settings.js";
+import { AVANZADO_FIELDS } from "./settings-avanzado.js";
 import { askMode, askPo, pickNext, resendRequest, setProjectOptions, startTeammateNow, wakePo } from "./company-actions.js";
 import { noteForAgent, resumeRun, stopOneRun } from "./company-runs.js";
 import { cancelOrder } from "./company-orders.js";
 import { construirPedido, descartarPedido, guardarPedido, pedidoDetail, restaurarPedido } from "./company-pedido.js";
-import { ideaDespertar, ideaDetail, ideaRespuesta, ideaVisto } from "./company-idea.js";
+import { ideaDecisionRoutes, ideaDespertar, ideaDetail, ideaRespuesta, ideaVisto } from "./company-idea.js";
 import { frameBytes } from "../pedidos/frames.js";
 import { promptDoc } from "./company-extra.js";
-import { fichaRead, projectDocRead } from "./company-ficha.js";
-import { addTeamMember, companyRead, projectRead } from "./company-org.js";
+import { fichaRead, hechoRead, projectDocRead, pulsoRead } from "./company-ficha.js";
+import { addTeamMember, companyRead, projectRead, serverTiming, type ReadProfile } from "./company-org.js";
 import { setMotores } from "./company-motores.js";
 import { checkMotor } from "../mcp/team.js";
 import { actOnDecision } from "./company-decisions.js";
 import { setCompanyPaused, setProjectPaused, setRunnerSettings } from "../runner/company.js";
 import { EFFORTS, MODEL_HINT, isModel } from "../runner/motor.js";
 import { checkOwnerCode, enrolOwnerCode, ownerCodeEnrolled } from "../auth/owner-code.js";
-import { deleteProject } from "../mcp/project.js";
 import { findProject } from "../mcp/queries.js";
-import { readerOf, storeOf } from "../store/port.js";
+import { readerOf } from "../store/port.js";
 import { MAX_PACKS, listPacks, packRef, rolePacks, setRolePacks } from "../runner/packs.js";
+import { oficioRead } from "./company-oficio.js";
+import { oficioSkillRoutes } from "./company-oficio-skills.js";
+import { oficioTrialRoutes } from "./company-oficio-trials.js";
+import { oficioLessonRoutes } from "./company-oficio-lessons.js";
+import { equipoRoutes } from "./company-equipo.js";
+import { teamRoutes } from "./company-teams.js";
+import { defineWords, say } from "../words.js";
+
+// PLA-I2-10: the company routes' own refusals in the install's language; the Spanish is unchanged.
+export const COMPANY_ROUTE_WORDS = defineWords({
+  es: { noFrame: "No encontré ese marco." },
+  en: { noFrame: "I could not find that frame." },
+});
 
 export const companyRoutes = new Hono();
 
 companyRoutes.use("*", async (c, next) => {
   if (/^\s*bearer\b/i.test(c.req.header("Authorization") ?? "")) {
-    return c.json({ error: "FORBIDDEN", hint: "the runner's settings and kill switches are Jorge's screen only" }, 403);
+    return c.json({ error: "FORBIDDEN", hint: "the runner's settings and kill switches are the owner's screen only" }, 403);
   }
   if (!verifySession(getCookie(c, SESSION_COOKIE))) return c.json({ error: "UNAUTHORIZED" }, 401);
   await next();
@@ -82,7 +117,55 @@ async function body<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer
 const Paused = z.object({ paused: z.boolean() }).strict();
 
 // PLA-I32-6: the read contract (src/api/company-org.ts). The runner's plumbing moved to GET /api/machine.
-companyRoutes.get("/", async (c) => c.json(await withDb((db) => companyRead(db))));
+// PLA-74: Server-Timing names the slowest steps (summed over projects), so a slow floor can be read from the browser.
+companyRoutes.get("/", async (c) => {
+  const prof: ReadProfile = new Map();
+  const t0 = performance.now();
+  const out = await withDb((db) => companyRead(db, new Date(), prof));
+  c.header("Server-Timing", serverTiming(prof, performance.now() - t0));
+  return c.json(out);
+});
+
+// PLA-I66-1: every project's logo (src/brand/logos.ts). Asking also looks at the repos whose last look is over a
+// minute old; a slow look does not hold the screen: it answers with what it has and the event bus brings the rest.
+export const LOGO_WAIT_MS = 1500;
+companyRoutes.get("/logos", async (c) => {
+  const logos = await withDb(async (db) => {
+    await Promise.race([refreshLogos(db), new Promise((r) => setTimeout(r, LOGO_WAIT_MS))]);
+    return logosRead(db);
+  });
+  return c.json({ logos });
+});
+
+companyRoutes.get("/projects/:slug/logo", async (c) => {
+  const r = await withDb((db) => logoBytes(db, c.req.param("slug")));
+  if (!r) return c.json({ error: "LOGO_NOT_FOUND" }, 404);
+  // The URL carries the version (?v=), so a cached copy is never stale. An SVG is an image here: nothing in it runs.
+  return c.body(new Uint8Array(r.bytes), 200, {
+    "Content-Type": r.mime,
+    "Cache-Control": "private, max-age=31536000, immutable",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+  });
+});
+
+// PLA-I66-2: the Marca door's read (the original, the checklist of icon files on the start branch, the candidates),
+// and a file of the repo the read showed, for the cards. ?fresh=1 reads the repo again now.
+companyRoutes.get("/projects/:slug/marca", async (c) => {
+  const r = await withDb((db) => marcaRead(db, c.req.param("slug"), { fresh: c.req.query("fresh") === "1" }));
+  return r ? c.json(r) : c.json({ error: "PROJECT_NOT_FOUND" }, 404);
+});
+
+companyRoutes.get("/projects/:slug/marca/file", async (c) => {
+  const r = await withDb((db) => marcaFile(db, c.req.param("slug"), c.req.query("path") ?? ""));
+  if (!r) return c.json({ error: "FILE_NOT_FOUND" }, 404);
+  return c.body(new Uint8Array(r.bytes), 200, {
+    "Content-Type": r.mime,
+    "Cache-Control": "private, max-age=60",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+  });
+});
 
 companyRoutes.get("/projects/:slug", async (c) => {
   try {
@@ -95,7 +178,170 @@ companyRoutes.get("/projects/:slug", async (c) => {
 // PLA-I47-1 (src/api/company-ficha.ts): what La ficha's tabs read (ideas, PRs, docs, lienzos).
 companyRoutes.get("/projects/:slug/ficha", async (c) => {
   try {
-    return c.json(await withDb((db) => fichaRead(db, c.req.param("slug"))));
+    return c.json(await withDb((db) => fichaRead(db, c.req.param("slug"), { all: c.req.query("todo") === "1" })));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+// PLA-I64-3: el pulso, steps done per day (?days=14).
+companyRoutes.get("/projects/:slug/pulso", async (c) => {
+  try {
+    const days = Number(c.req.query("days") ?? 14);
+    return c.json(await withDb((db) => pulsoRead(db, c.req.param("slug"), { days: Number.isFinite(days) ? days : 14 })));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+// NEWPROJ-4: the readiness list. Reads only. Tests swap the environment, git and the filesystem (setReadinessDeps).
+let readinessDeps: ReadinessDeps = {};
+export const setReadinessDeps = (d: ReadinessDeps | null): void => {
+  readinessDeps = d ?? {};
+};
+
+companyRoutes.get("/projects/:slug/readiness", async (c) => {
+  try {
+    return c.json(await withDb((db) => projectReadiness(db, c.req.param("slug"), readinessDeps)));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+// NEWPROJ-6: the Ajustes view (src/api/project-settings.ts). Every write goes through setProject or attachDoc with the
+// version the screen read; a body with a key it does not know (a token field, say) is INVALID_BODY.
+companyRoutes.get("/projects/:slug/settings", async (c) => {
+  try {
+    return c.json(await withDb((db) => settingsRead(db, c.req.param("slug"))));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+const Version = z.number().int().min(1);
+const CodeBody = z.object({ version: Version, repo_path: z.string().max(500).optional(), github_repo: z.string().max(140).optional(), no_code: z.boolean().optional() }).strict();
+const ReleaseBody = z
+  .object({ version: Version, release: z.object({ from: z.string().max(100), into: z.string().max(100), env: z.string().max(40), mode: z.enum(["command", "merge"]).optional(), prod_migrations: z.enum(["deploy", "owner", "none"]).optional() }).strict().nullable() })
+  .strict();
+const VerifyBody = z.object({ version: Version, commands: z.array(z.string().max(300)).max(8), no_build: z.string().trim().min(3).max(240).nullable().optional() }).strict();
+const ContextBody = z.object({ markdown: z.string().max(60_000), version: Version.optional() }).strict();
+// PLA-135: a library doc from Ajustes.
+const LibraryBody = z.object({ title: z.string().min(1).max(120), markdown: z.string().max(60_000), version: Version.optional() }).strict();
+
+// PLA-I2-5: preparing the code and the working branch (src/api/repo-setup.ts), behind the same guard.
+companyRoutes.route("/", repoSetupRoutes);
+
+companyRoutes.put("/projects/:slug/settings/code", async (c) => {
+  const input = await body(c, CodeBody);
+  if (input instanceof Response) return input;
+  try {
+    // The same folder check as creating a project (setNewProjectRepoCheck swaps it in tests).
+    const out = await withDb((db) => setCodeLocation(db, c.req.param("slug"), input, newProjectRepoCheck));
+    if ("error" in out) {
+      const { status, ...rest } = out;
+      return c.json(rest, status);
+    }
+    return c.json(out);
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+companyRoutes.put("/projects/:slug/settings/release", async (c) => {
+  const input = await body(c, ReleaseBody);
+  if (input instanceof Response) return input;
+  try {
+    return c.json(await withDb((db) => setReleaseStep(db, c.req.param("slug"), input)));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+companyRoutes.put("/projects/:slug/settings/verify", async (c) => {
+  const input = await body(c, VerifyBody);
+  if (input instanceof Response) return input;
+  try {
+    return c.json(await withDb((db) => setVerifyList(db, c.req.param("slug"), input)));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+// PLA-I2-6: how the app starts, and one «Avanzado» field. A refusal (a secret, a value that is not a variable's name)
+// writes nothing.
+const CaptureBody = z
+  .object({
+    version: Version,
+    capture: z
+      .object({
+        start_command: z.string().max(300),
+        port: z.number().int(),
+        install_command: z.string().max(300).nullable(),
+        ready_path: z.string().max(300).nullable(),
+        pages: z.array(z.object({ path: z.string().max(300), label: z.string().max(60) }).strict()).max(12),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+const AdvancedBody = z.object({ version: Version, field: z.enum(AVANZADO_FIELDS), value: z.unknown() }).strict();
+const refusalOr = <T extends object>(c: Context, out: T) => {
+  if ("error" in out && "status" in out) {
+    const { status, ...rest } = out as { status: 400 | 404 | 409 };
+    return c.json(rest, status);
+  }
+  return c.json(out);
+};
+
+companyRoutes.put("/projects/:slug/settings/capture", async (c) => {
+  const input = await body(c, CaptureBody);
+  if (input instanceof Response) return input;
+  try {
+    return refusalOr(c, await withDb((db) => setCapture(db, c.req.param("slug"), input)));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+companyRoutes.put("/projects/:slug/settings/advanced", async (c) => {
+  const input = await body(c, AdvancedBody);
+  if (input instanceof Response) return input;
+  try {
+    return refusalOr(c, await withDb((db) => setAdvanced(db, c.req.param("slug"), { version: input.version, field: input.field, value: input.value ?? null })));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+companyRoutes.put("/projects/:slug/settings/context/:doc", async (c) => {
+  const doc = c.req.param("doc") as ContextDocId;
+  if (!(CONTEXT_DOC_IDS as readonly string[]).includes(doc)) return c.json({ error: "DOC_NOT_FOUND", doc }, 404);
+  const input = await body(c, ContextBody);
+  if (input instanceof Response) return input;
+  try {
+    return c.json(await withDb((db) => putContextDoc(db, c.req.param("slug"), doc, input)));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+// PLA-135: a library doc from Ajustes (create by title, or replace with the version read).
+companyRoutes.put("/projects/:slug/settings/docs", async (c) => {
+  const input = await body(c, LibraryBody);
+  if (input instanceof Response) return input;
+  try {
+    return refusalOr(c, await withDb((db) => putLibraryDoc(db, c.req.param("slug"), input)));
+  } catch (e) {
+    return fail(c, e);
+  }
+});
+
+// PLA-I64-6: Hecho, day by day (?hasta=YYYY-MM-DD&dias=14).
+companyRoutes.get("/projects/:slug/hecho", async (c) => {
+  try {
+    const until = c.req.query("hasta");
+    const days = Number(c.req.query("dias") ?? 14);
+    return c.json(await withDb((db) => hechoRead(db, c.req.param("slug"), { until: until && /^\d{4}-\d{2}-\d{2}$/.test(until) ? until : undefined, days: Number.isFinite(days) ? days : 14 })));
   } catch (e) {
     return fail(c, e);
   }
@@ -104,12 +350,12 @@ companyRoutes.get("/projects/:slug/ficha", async (c) => {
 // PLA-I35-1 (src/api/company-decisions.ts): act on one Te toca row.
 const DecisionBody = z
   .object({
-    action: z.enum(["elegir", "responder", "hecho", "aplazar", "aceptar", "fusionar", "cambios", "empezar", "cambiar", "cancelar", "despues", "aplicar", "verificar"]),
+    action: z.enum(["elegir", "responder", "hecho", "aplazar", "aceptar", "fusionar", "cambios", "empezar", "cambiar", "cancelar", "despues", "aplicar", "verificar", "aprobar", "once", "rechazar"]), // PLA-I67-3: a lesson
     option: z.union([z.number().int().min(1).max(20), z.array(z.number().int().min(1).max(20)).min(1).max(5)]).optional(),
     text: z.string().trim().min(1).max(2000).optional(),
     // PLA-I52-6, Devolver a Taller from El Probador: the pins the owner put on the pictures.
     marcas: z
-      .array(z.object({ vista: z.string().max(40), side: z.enum(["antes", "despues"]), width: z.enum(["desktop", "phone"]), x: z.number().min(0).max(1), y: z.number().min(0).max(1), note: z.string().max(300) }).strict())
+      .array(z.object({ vista: z.string().max(40), side: z.enum(["antes", "despues"]), width: z.enum(["desktop", "phone"]), x: z.number().min(0).max(1), y: z.number().min(0).max(1), note: z.string().max(600) }).strict())
       .max(12)
       .optional(),
     // aplicar: the file and the lines the owner reviewed (a file step).
@@ -195,7 +441,7 @@ const MotoresBody = z
       .optional(),
     // PLA-I60-5: the project's «Agentes a la vez», «Por agente», «Preguntas a la vez».
     floor: z.object({ max_concurrent: z.number().int().min(0).max(500).optional(), max_per_agent: z.number().int().min(1).max(50).optional(), consulta_slots: z.number().int().min(0).max(20).optional() }).strict().optional(),
-    // PLA-I60-5: «Tope de la Mac» (the company ceiling) rides with the company default motor.
+    // PLA-I60-5: «Tope de la máquina» (the company ceiling) rides with the company default motor.
     company: MotorBody.extend({ max_concurrent: z.number().int().min(0).max(500).optional() }).strict().optional(),
   })
   .strict();
@@ -222,12 +468,21 @@ companyRoutes.get("/projects/:slug/team/:agent/packs", async (c) => {
   return c.json(out);
 });
 
-const PacksBody = z.object({ packs: PackSlugs }).strict();
+companyRoutes.get("/projects/:slug/team/:agent/oficio", async (c) => {
+  const out = await withDb((db) => oficioRead(db, c.req.param("slug"), c.req.param("agent")));
+  if ("error" in out) {
+    const { status, ...rest } = out;
+    return c.json(rest, status);
+  }
+  return c.json(out);
+});
+
+const PacksBody = z.object({ packs: PackSlugs, own: z.boolean().optional() }).strict();
 
 companyRoutes.put("/projects/:slug/team/:agent/packs", async (c) => {
   const input = await body(c, PacksBody);
   if (input instanceof Response) return input;
-  const out = await withDb((db) => setRolePacks(db, c.req.param("slug"), c.req.param("agent"), input.packs));
+  const out = await withDb((db) => setRolePacks(db, c.req.param("slug"), c.req.param("agent"), input.packs, process.env, { own: input.own }));
   if ("error" in out) {
     const { status, ...rest } = out;
     return c.json(rest, status);
@@ -311,9 +566,8 @@ companyRoutes.delete("/projects/:slug", async (c) => {
         const { status, ...rest } = refused;
         return c.json(rest, status);
       }
-      // Everything under the project goes with it, through the store (what the foreign keys' cascades did).
-      await storeOf(db).write(p.id, {}, (uow) => deleteProject(uow, p.id));
-      return c.json({ deleted: p.slug });
+      // NEWPROJ-7: stops its runs, removes its worktrees and its team, then the row (src/runner/delete-project.ts).
+      return c.json(await deleteProject(db, p));
     });
   } catch (e) {
     return fail(c, e);
@@ -369,7 +623,8 @@ companyRoutes.post("/projects/:slug/wake", async (c) => {
 });
 
 // PLA-I40-2: Que empiece ya for one teammate. The body is optional: {past_guard} also passes the plan guard once.
-const StartNow = z.object({ past_guard: z.boolean().optional() }).strict();
+// PLA-165: key starts that step (it must be the teammate's ready work); without it, the teammate's next ready step.
+const StartNow = z.object({ past_guard: z.boolean().optional(), key: z.string().trim().min(1).max(40).optional() }).strict();
 companyRoutes.post("/projects/:slug/team/:agent/start", async (c) => {
   const raw = await c.req.text();
   let json: unknown = {};
@@ -426,6 +681,20 @@ companyRoutes.post("/projects/:slug/pedidos/:key/descartar", async (c) => {
   if (!input.success) return c.json({ error: "INVALID_BODY" }, 400);
   return send(c, await withDb((db) => descartarPedido(db, c.req.param("slug"), c.req.param("key"), input.data.reason)));
 });
+// AUDIT-8: the owner's pick on one of the PO's decisions (POST /projects/:slug/ideas/:key/decision).
+companyRoutes.route("/", ideaDecisionRoutes);
+// PLA-I67-2: the owner's skills and «tu manera» (src/api/company-oficio-skills.ts).
+companyRoutes.route("/", oficioSkillRoutes);
+// PLA-I67-6: «Traer de un enlace» and «Probar».
+companyRoutes.route("/", oficioTrialRoutes);
+// PLA-I67-3: an agent's lessons (src/api/company-oficio-lessons.ts).
+companyRoutes.route("/", oficioLessonRoutes);
+// PLA-I71-3: move, pause, retire and add seats; the owner decides a PO's proposal.
+companyRoutes.route("/", equipoRoutes);
+// PLA-I71-6: the team catalog and the whole company in a file.
+companyRoutes.route("/", teamRoutes);
+// PLA-I68: Camino, a project's path from code to people (src/api/company-camino.ts).
+companyRoutes.route("/", caminoRoutes);
 // PLA-I61 (La idea abierta, src/api/company-idea.ts): any idea, its stops and deliveries; seen, answers, wake, frames.
 companyRoutes.get("/projects/:slug/ideas/:key", async (c) => send(c, await withDb((db) => ideaDetail(db, c.req.param("slug"), c.req.param("key")))));
 companyRoutes.post("/projects/:slug/ideas/:key/visto", async (c) => {
@@ -447,10 +716,12 @@ companyRoutes.post("/projects/:slug/ideas/:key/respuesta", async (c) => {
   if (input instanceof Response) return input;
   return send(c, await withDb((db) => ideaRespuesta(db, c.req.param("slug"), c.req.param("key"), input)));
 });
+// PLA-I74-8: «Pedir arreglo» on a failed production deploy.
+companyRoutes.post("/projects/:slug/initiatives/:key/arreglo", async (c) => send(c, await withDb((db) => pedirArreglo(db, c.req.param("slug"), c.req.param("key")))));
 companyRoutes.post("/projects/:slug/ideas/:key/despertar", async (c) => send(c, await withDb((db) => ideaDespertar(db, c.req.param("slug"), c.req.param("key")))));
 companyRoutes.get("/projects/:slug/ideas/:key/frames/:id", async (c) => {
   const r = await withDb((db) => frameBytes(db, c.req.param("slug"), c.req.param("key"), c.req.param("id")));
-  if (!r) return c.json({ error: "FRAME_NOT_FOUND", hint: "No encontré ese marco." }, 404);
+  if (!r) return c.json({ error: "FRAME_NOT_FOUND", hint: say(COMPANY_ROUTE_WORDS).noFrame }, 404);
   return c.body(new Uint8Array(r.bytes), 200, { "Content-Type": r.mime, "Cache-Control": "private, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff" });
 });
 // PLA-I40-6: Reenviar a request nobody took (Cerrar is the cancel below).
@@ -481,12 +752,28 @@ companyRoutes.put("/projects/:slug/options", async (c) => {
   return c.json(out);
 });
 
-const NewProjectBody =z.object({ name: z.string().min(1).max(40), goal: z.string().min(1).max(280) }).strict();
+// NEWPROJ-3: where the code is: a folder on this machine (checked before creating), a GitHub repo (owner/name, shape
+// only), both, or no_code. Shapes are checked by createProjectFromTemplate so a refusal names its field.
+const NewProjectBody = z
+  .object({
+    name: z.string().min(1).max(NEW_PROJECT_NAME_MAX),
+    goal: z.string().min(1).max(NEW_PROJECT_GOAL_MAX),
+    repo_path: z.string().max(500).optional(),
+    github_repo: z.string().max(140).optional(),
+    no_code: z.boolean().optional(),
+  })
+  .strict();
+
+// NEWPROJ-3: the folder check's git and filesystem; tests swap them (setNewProjectRepoCheck).
+let newProjectRepoCheck: RepoCheckDeps = defaultRepoCheckDeps;
+export const setNewProjectRepoCheck = (d: RepoCheckDeps | null): void => {
+  newProjectRepoCheck = d ?? defaultRepoCheckDeps;
+};
 
 companyRoutes.post("/projects", async (c) => {
   const input = await body(c, NewProjectBody);
   if (input instanceof Response) return input;
-  const out = await withDb((db) => createProjectFromTemplate(db, input));
+  const out = await withDb((db) => createProjectFromTemplate(db, input, { repoCheck: newProjectRepoCheck, releaseFromScreen: true }));
   if ("error" in out) {
     const { status, ...rest } = out;
     return c.json(rest, status);

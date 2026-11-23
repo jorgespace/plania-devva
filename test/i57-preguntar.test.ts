@@ -59,21 +59,29 @@ class FakeChild extends EventEmitter {
   }
 }
 function fakes() {
-  const spawned: (FakeChild & { args: string[]; cwd: string; settings: string })[] = [];
+  const spawned: (FakeChild & { args: string[]; cwd: string; settings: string; env: NodeJS.ProcessEnv })[] = [];
   let n = 80_000;
   const deps = {
-    env: { HOME: scratch, PATH: "/usr/bin:/bin", PLANIA_RUNNER_TOKEN: "runner-token", PLANIA_PROMPTS_PROJECT: "micasa", CLAUDE_CODE_BIN: "/fake/bin/claude", PLANIA_EVENT_WAKES: "1" } as NodeJS.ProcessEnv,
+    env: { HOME: scratch, PATH: "/usr/bin:/bin", PLANIA_RUNNER_TOKEN: "runner-token", PLANIA_PROMPTS_PROJECT: "micasa", CLAUDE_CODE_BIN: "/fake/bin/claude", PLANIA_EVENT_WAKES: "1",
+      // PLA-I2-13: Plania's secrets (never passed) and the machine's Claude key (passed unchanged).
+      DATABASE_URL: "postgres://plania-secret", MCP_BEARER_TOKEN: "bearer-secret", SESSION_SECRET: "s", GITHUB_TOKEN: "g", VAPID_PRIVATE_KEY: "v", ANTHROPIC_API_KEY: "sk-ant-buyer" } as NodeJS.ProcessEnv,
     logDir: path.join(scratch, "logs"),
     tmpDir: path.join(scratch, "tmp"),
     worktreeRoot: path.join(scratch, "worktrees"),
     graceMs: 10,
     liveFlushMs: 0,
     footprints: false,
-    git: async () => ({ code: 0, stdout: "", stderr: "" }),
-    spawn: (_bin: string, args: string[], opts: { cwd: string }) => {
-      const child = new FakeChild(++n) as FakeChild & { args: string[]; cwd: string; settings: string };
+    // PLA-66: a question reads its own copy, made with `git worktree add --detach <path> origin/sandbox`.
+    git: async (args: string[]) => {
+      if (args[0] === "worktree" && args[1] === "add") mkdirSync(args[3]!, { recursive: true });
+      if (args[0] === "rev-parse" && args[1] === "--short") return { code: 0, stdout: "92111e1\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    spawn: (_bin: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) => {
+      const child = new FakeChild(++n) as FakeChild & { args: string[]; cwd: string; settings: string; env: NodeJS.ProcessEnv };
       child.args = args;
       child.cwd = opts.cwd;
+      child.env = opts.env;
       child.settings = readFileSync(args[args.indexOf("--settings") + 1]!, "utf8");
       spawned.push(child);
       return child;
@@ -139,26 +147,32 @@ test("I57-1 #1: Preguntar keeps a consulta, creates no task, and queues the PO m
   const row = (await store.get("consultas", { id: out.consulta }))!;
   assert.equal(row.runId, q[0]!.id);
   const [c] = await list();
-  assert.equal(c!.state, "leyendo");
+  assert.equal(c!.state, "cola", "PLA-69: queued is in line, not reading");
   assert.equal(c!.text, "¿Por qué se recarga toda la página al cambiar de sección?");
 });
 
-test("I57-1 #2: the question's run is read-only, works in the project's checkout, gets the question prompt and keeps no session", async () => {
+test("I57-1 #2 (PLA-66): the question's run is read-only, works in a fresh copy of origin/sandbox, gets the question prompt and keeps no session", async () => {
   const out = await ask({ text: "¿Dónde se guarda el teléfono?", mode: "pregunta" });
   const f = fakes();
   const d = await runner.drainQueue(db, new Date(), f.deps as never);
   assert.equal(d.started, 1, await runsText());
   const child = f.spawned[0]!;
-  assert.equal(child.cwd, repo);
+  const copy = path.join(scratch, "worktrees", "micasa", "_consulta");
+  assert.equal(child.cwd, copy);
+  assert.match(child.args[1]!, /read-only copy of the project at origin\/sandbox 92111e1/);
   const deny = (JSON.parse(child.settings) as { permissions: { deny: string[] } }).permissions.deny;
   for (const rule of ["Edit", "Write", "Bash(git commit*)", "Bash(rm*)", "Bash(pnpm*)", "mcp__plania__create_task"]) assert.ok(deny.includes(rule), rule);
   const prompt = child.args[1]!;
-  assert.match(prompt, /answer one question from Jorge/);
+  assert.match(prompt, /answer one question from the owner/);
   assert.match(prompt, /«¿Dónde se guarda el teléfono\?»/);
   assert.match(prompt, new RegExp(`answer_consulta \\{project: "micasa", id: "${out.consulta}"`));
   assert.ok(!prompt.includes("Plania first: open the ticket"), "not the ticket prompt");
   assert.ok(!child.args.includes("--resume"));
-  child.finish([{ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: path.join(repo, "src/app/page.tsx") } }, { type: "tool_use", name: "Grep", input: { pattern: "telefono" } }] } }]);
+  // PLA-I2-13 #1 #2: a Preguntar run gets the same allow-list: no Plania secret, Claude's key unchanged.
+  for (const k of ["DATABASE_URL", "MCP_BEARER_TOKEN", "SESSION_SECRET", "GITHUB_TOKEN", "VAPID_PRIVATE_KEY"]) assert.equal(child.env[k], undefined, k);
+  assert.equal(child.env.ANTHROPIC_API_KEY, "sk-ant-buyer");
+  assert.equal(child.env.PLANIA_RUNNER_TOKEN, "runner-token");
+  child.finish([{ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: path.join(copy, "src/app/page.tsx") } }, { type: "tool_use", name: "Grep", input: { pattern: "telefono" } }] } }]);
   await runner.waitForAllRuns();
   assert.equal(await store.count("agentSessions"), 0, "the PO's session is left alone");
   const [c] = await list();
@@ -193,7 +207,7 @@ test("I57-1 #4 (PLA-I60): a busy PO still gets the question queued at once: a qu
   await store.fix((uow) => uow.insert("agentRuns", { agentId: po, projectId: micasa, role: "product-owner", status: "running", summary: "running", workKey: "general" }));
   const out = await ask({ text: "¿Cuántas sucursales hay?", mode: "pregunta" });
   assert.equal(out.wake, "queued");
-  assert.equal((await list())[0]!.state, "leyendo");
+  assert.equal((await list())[0]!.state, "cola");
   assert.equal(await consultas.retryConsultas(db), 0, "nothing to retry: it already has its run");
 });
 
@@ -256,7 +270,10 @@ test("PLA-50 #3: a second question waits (queued, not dropped) while one questio
   const d = await runner.drainQueue(db, new Date(), f.deps as never);
   assert.equal(d.started, 0);
   assert.equal(f.spawned.length, 0);
-  assert.equal((await list())[0]!.state, "leyendo", "still queued, not dropped");
+  // PLA-69: still queued, not dropped; it reads «cola» with the runner's reason, not «leyendo».
+  const [held] = await list();
+  assert.equal(held!.state, "cola", "still queued, not dropped");
+  assert.ok(held!.held, "says why it waits");
   const c = (await store.get("consultas", { id: out.consulta }))!;
   const queued = c.runId ? await store.get("agentRuns", { id: c.runId }) : undefined;
   assert.equal(queued?.status, "queued");

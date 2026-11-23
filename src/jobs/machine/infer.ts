@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import type { Actor, Workspace } from "../../db/schema.js";
 import { liveOwner } from "../../mcp/queries.js";
 import { shq } from "./parse.js";
+import { installLanguage } from "../../language.js";
+import { ST } from "../../state/status.js";
 
 // Who owns what the machine job sees, worked out from the Plania data (no agent call needed):
 //   process cwd → worktree (or the repo's main checkout) → branch → branches.owner_task_id → ticket → live claim → session
@@ -133,8 +135,8 @@ const norm = (s: string) => s.toLowerCase().replace(/-/g, "_");
 
 export type DbName = { prefix: { projectId: string | null; repo: string | null } | null; testHash: string | null; keyParts: string[] };
 
-// `<project>_<ticket-key>_<purpose>` (zigzag_zig_i5_scratch), `<project>_test_<6 hex>` (plania_test_fadac0)
-// or the bare project/repo name (zigzag). The project may be a repo that is not a project yet (plania).
+// `<project>_<ticket-key>_<purpose>` (tienda_tnd_i5_scratch), `<project>_test_<6 hex>` (plania_test_fadac0)
+// or the bare project/repo name (tienda). The project may be a repo that is not a project yet (plania).
 export function parseDbName(name: string, dir: Directory): DbName {
   const prefixes: { token: string; projectId: string | null; repo: string | null }[] = [
     ...dir.projects.map((p) => ({ token: norm(p.slug), projectId: p.id, repo: dir.repos.find((r) => r.projectId === p.id)?.name ?? p.slug })),
@@ -165,7 +167,7 @@ export function ownerOfDatabase(dir: Directory, name: string, now: Date): Owner 
     const at = path ? ownerOfPath(dir, path, now) : null;
     return { ...base, ...(at && at.via !== "none" ? { taskId: at.taskId, sessionId: at.sessionId } : {}), extra: { test_hash: parsed.testHash, repo_path: path ?? null } };
   }
-  // Longest run of tokens that is a ticket key: zig_i5_scratch → ZIG-I5 + "scratch"; zig_i5_2_copy → ZIG-I5-2.
+  // Longest run of tokens that is a ticket key: tnd_i5_scratch → TND-I5 + "scratch"; tnd_i5_2_copy → TND-I5-2.
   const keys = projectId ? dir.tasksByKey.get(projectId) : undefined;
   for (let n = parsed.keyParts.length; n >= 1 && keys; n--) {
     const task = keys.get(parsed.keyParts.slice(0, n).join("-").toUpperCase());
@@ -188,7 +190,7 @@ export const primaryPgPort = (): number => Number(process.env.PLANIA_PRIMARY_PG_
 //   - a database server (db_server) or a brew service: shared by every project
 //   - a LaunchAgent whose label names a repo (com.plania.server)
 //   - postgres / template0 / template1 anywhere, and a database named exactly like a project slug or a repo
-//     (plania, micasa, zigzag) on the main Postgres server only (PLANIA_PRIMARY_PG_PORT, default 5432)
+//     (plania, tienda, agenda) on the main Postgres server only (PLANIA_PRIMARY_PG_PORT, default 5432)
 // `<project>_test_<hash>` and `<project>_<ticket>_<purpose>` copies are not primary: they are what agents make.
 export function isPrimary(item: Observed, dir: Directory): boolean {
   if (item.self) return true;
@@ -196,7 +198,8 @@ export function isPrimary(item: Observed, dir: Directory): boolean {
     case "db_server":
       return true;
     case "service":
-      return item.details.manager === "brew" || !!item.repoHint;
+      // PLA-I2-19: a systemd user unit that runs Postgres is a base, like a brew service.
+      return item.details.manager === "brew" || (item.details.manager === "systemd" && /postgres/.test(String(item.details.exec ?? ""))) || !!item.repoHint;
     case "database": {
       const name = (item.database?.name ?? String(item.details.name ?? "")).toLowerCase();
       if (!name) return false;
@@ -204,8 +207,13 @@ export function isPrimary(item: Observed, dir: Directory): boolean {
       // the project's main one only on the main server. On a scratch server (Postgres 17 on :5433) it
       // is a copy someone made, an ordinary row with its dropdb.
       if (PRIMARY_DATABASES.has(name)) return true;
-      if ((item.database?.port ?? primaryPgPort()) !== primaryPgPort()) return false;
       const own = new Set([...dir.projects.map((p) => p.slug), ...dir.repos.map((r) => r.name)].flatMap((n) => [n.toLowerCase(), norm(n)]));
+      // PLA-146: `<project>_dev`, `_development`, `_local` and `_test` (nothing after the suffix) are the app's own
+      // databases wherever its Postgres runs (an app may keep them on :5433). Cleanup offered `dropdb <app>_dev` once
+      // the setup ticket that declared it was Done. Plania's copies always carry more (`_entrega`, `_prueba`, a hash).
+      const base = /^(.+)_(dev|development|local|test)$/.exec(norm(name))?.[1];
+      if (base && own.has(base)) return true;
+      if ((item.database?.port ?? primaryPgPort()) !== primaryPgPort()) return false;
       return own.has(name) || own.has(norm(name));
     }
     default:
@@ -221,8 +229,8 @@ export const STALE_LONG_MS = 24 * 3600_000; // databases, containers (and declar
 export const GHOST_DECLARED_MS = 5 * 60_000; // declared, never observed: ghost this long after declared_at
 export const GHOST_MISSES = 2; // declared and observed before: ghost after this many ticks of its collector without it
 export const GHOST_RELEASE_MS = 3600_000; // a ghost row is released (bookkeeping only) an hour after it turned ghost
-export const CLOSED_STATUSES = ["Done", "Merged", "Won't do", "Released"];
-const MERGED_STATUSES = ["Done", "Merged", "Released"];
+export const CLOSED_STATUSES: string[] = [ST.done, ST.merged, ST.wontDo, ST.released];
+const MERGED_STATUSES: string[] = [ST.done, ST.merged, ST.released];
 
 // null = never stale from ticket rules. A worktree goes by its branch, not by a clock; database
 // servers and services are the machine's, shared, and never stale.
@@ -354,7 +362,7 @@ function staleVerdict(i: StateInput, now: Date): Verdict | null {
     // counts only when work was committed here (a new worktree on a merged commit is not "merged work").
     if (w.branchMergedAt) return { state: "stale", reason: "rama fusionada", since: w.branchMergedAt };
     if (w.merged === true && (w.ownCommits ?? 0) > 0) return { state: "stale", reason: "rama fusionada", since: null };
-    if (t && (MERGED_STATUSES.includes(t.status) || t.status === "Won't do")) {
+    if (t && (MERGED_STATUSES.includes(t.status) || t.status === ST.wontDo)) {
       return { state: "stale", reason: `${noun(t)} ${t.key} ${t.status}`, since: t.closedAt };
     }
     return null;
@@ -383,7 +391,10 @@ export function describeStale(details: Record<string, unknown>, now: Date): stri
   if (!reason) return null;
   const since = typeof details.stale_since === "string" ? new Date(details.stale_since) : null;
   if (!since || Number.isNaN(since.getTime())) return reason;
-  return `${reason} ${reason === "sin claim" ? "desde hace" : "hace"} ${spanAgo(now.getTime() - since.getTime())}`;
+  // PLA-I2-10: the stored reason stays as written; the time around it follows the install's language.
+  const span = spanAgo(now.getTime() - since.getTime());
+  if (installLanguage() === "en") return reason === "sin claim" ? `no claim for ${span}` : `${reason} ${span} ago`;
+  return `${reason} ${reason === "sin claim" ? "desde hace" : "hace"} ${span}`;
 }
 
 export function spanAgo(ms: number): string {
@@ -393,7 +404,7 @@ export function spanAgo(ms: number): string {
   return `${Math.round(min / 1440)} d`;
 }
 
-// ---- suggested teardown (shown to Jorge, never run by Plania)
+// ---- suggested teardown (shown to the owner, never run by Plania)
 
 export function suggestTeardown(o: Observed, repoPath: string | null): string {
   const d = o.details;
@@ -407,6 +418,7 @@ export function suggestTeardown(o: Observed, repoPath: string | null): string {
       return pid ? `kill ${pid}` : "";
     case "db_server":
       if (typeof d.brew_service === "string") return `brew services stop ${d.brew_service}`;
+      if (typeof d.systemd_unit === "string") return `systemctl --user stop ${shq(d.systemd_unit)}`;
       if (d.engine === "postgres" && typeof d.data_dir === "string") return `pg_ctl -D ${shq(d.data_dir)} stop`;
       return pid ? `kill ${pid}` : "";
     case "database":
@@ -415,6 +427,7 @@ export function suggestTeardown(o: Observed, repoPath: string | null): string {
       return `docker rm -f ${shq(String(d.name))}`;
     case "service":
       if (d.manager === "brew") return `brew services stop ${d.brew_formula ?? d.name}`;
+      if (d.manager === "systemd") return `systemctl --user disable --now ${shq(String(d.name))}`;
       return typeof d.file === "string" ? `launchctl unload ${shq(String(d.file))}` : "";
     default:
       return "";

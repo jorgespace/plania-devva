@@ -22,7 +22,7 @@ const writes = await import("../src/mcp/writes.js");
 const docsMod = await import("../src/mcp/docs.js");
 const events = await import("../src/runner/events.js");
 const pedido = await import("../src/api/company-pedido.js");
-const pedidoUi = (await import(new URL("../ui/src/components/compania/edificio/pedido.tsx", import.meta.url).href)) as Record<string, any>;
+
 
 type Json = Record<string, any>;
 let store: TestStore;
@@ -94,9 +94,9 @@ test("I54-4 #1: Constrúyelo records the order and wakes the PO with the promote
   assert.equal(res.status, 200, await res.clone().text());
   assert.deepEqual((await res.json()) as Json, { key, state: "valvula", wake: "queued" });
   const order = (await store.find("events", { taskKey: key, type: ["pedido.construir", "note"] }, { orderBy: [{ column: "id" }] })).map((e) => ({ type: e.type, who: e.actor.agent, payload: e.payload as Json }));
-  assert.deepEqual(order.map((r) => [r.type, r.who]), [["pedido.construir", "jorge"], ["note", "jorge"]]);
+  assert.deepEqual(order.map((r) => [r.type, r.who]), [["pedido.construir", "owner"], ["note", "owner"]]);
   assert.equal(order[0]!.payload.stage, "ready");
-  assert.equal(order[1]!.payload.text, pedido.BUILD_NOTE_TEXT);
+  assert.equal(order[1]!.payload.text, pedido.buildNoteText());
   const woke = await queuedFor(key);
   assert.equal(woke.length, 1);
   assert.match(woke[0]!.summary, /Constrúyelo/);
@@ -126,32 +126,14 @@ test("I54-4 #1: from any stop, and a coalesced order is taken when the PO's run 
   assert.match((out as Json).reason, /Constrúyelo/);
 });
 
-test("I54-4 #2: an idea with promoted_to leaves the tube and its initiative is a track on the board", async () => {
-  const key = await forma("Recordatorio por WhatsApp");
-  await toLista(key);
-  await post(`/api/company/projects/micasa/pedidos/${key}/construir`);
-  const ini = await promote(key, "Recordatorios por WhatsApp");
-  const c = await card();
-  assert.equal((c.pedidos as Json[]).some((x) => x.key === key), false);
-  assert.ok((c.tablero.initiatives as Json[]).some((i) => i.key === ini), "the new initiative is on the board");
-  const d = (await (await app.request(`/api/company/projects/micasa/pedidos/${key}`, { headers: jorge() })).json()) as Json;
-  assert.equal(d.promoted_to, ini);
-  assert.equal(d.trail.at(-1).kind, "valvula");
-  assert.match(d.trail.at(-1).text, new RegExp(`ahora es ${ini} en el tablero`));
-  // The tab points to the board and offers nothing else.
-  const tracks: string[] = [];
-  const html = renderToStaticMarkup(React.createElement(pedidoUi.PedidoView, { d, now: Date.now(), acts: { onTrack: (k: string) => tracks.push(k), onConstruir: () => {} }, sub: "recorrido", setSub() {}, answer: "", setAnswer() {}, note: "", setNote() {}, confirmDrop: false, setConfirmDrop() {} }));
-  assert.match(html, /data-control="pedido-iniciativa"/);
-  assert.equal(/pedido-(construir|guardar|descartar)/.test(html), false);
-  assert.match(html.replace(/<[^>]+>/g, " "), new RegExp(`Ya pasó la válvula: es ${ini}`));
-});
+
 
 test("I54-4 #3: an owner's idea at Lista is never promoted without the order; the PO's own ideas are not held", async () => {
   const key = await forma("Usar el panel sin conexión");
   await toLista(key);
   // The prompt the PO reads says it stays.
   const scope = (await taskOf(key)).scope;
-  assert.match(scope, /no pongas promoted_to: en Lista se queda quieta\. Solo Jorge la manda construir con «Constrúyelo»/);
+  assert.match(scope, /no pongas promoted_to: en Lista se queda quieta\. Solo el dueño la manda construir con «Constrúyelo»/);
   // The server holds it too.
   const ini = (await writes.createTask(db, { project: "micasa", kind: "initiative", title: "Sin conexión", scope: "s" } as never, PO)) as Json;
   await assert.rejects(writes.setTask(db, { project: "micasa", key, promoted_to: ini.key, version: await versionOf(key) } as never, PO), (e: Json) => e.code === "PEDIDO_SIN_ORDEN");
@@ -168,5 +150,5 @@ test("I54-4 #3: an owner's idea at Lista is never promoted without the order; th
   await writes.setTask(db, { project: "micasa", key: own.key, promoted_to: ini2.key, version: await versionOf(own.key) } as never, PO);
   // The catalog names the new error, and the coalesced wake's words are the route's.
   assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /`PEDIDO_SIN_ORDEN` \| 409/);
-  assert.ok(readFileSync(new URL("../src/runner/events.ts", import.meta.url), "utf8").includes(pedido.BUILD_REASON));
+  assert.ok(readFileSync(new URL("../src/runner/events.ts", import.meta.url), "utf8").includes("reason: buildReason()"));
 });

@@ -1,4 +1,4 @@
-// PLA-I52-5: En vivo. «Pruébala en vivo» opens the delivery's own copy already signed in, on the Mac and, when the
+// PLA-I52-5: En vivo. «Pruébala en vivo» opens the delivery's own copy already signed in, on the machine and, when the
 // Mac has Tailscale, on the phone. Plania signs the test user in once (a fresh password, never kept), then serves
 // the copy through a small proxy on a loopback port that adds that session to every request. Nothing listens on the
 // LAN: the proxy binds 127.0.0.1 and refuses any other peer; `tailscale serve` forwards the tailnet to it, as it
@@ -10,9 +10,30 @@ import { connect, type AddressInfo, type Socket } from "node:net";
 import type { Db } from "../db/client.js";
 import { ToolError } from "../mcp/errors.js";
 import { readerOf } from "../store/port.js";
-import { entregaRead } from "./prueba.js";
+import { entregaEnv, entregaRead } from "./prueba.js";
 import { sessionCookies } from "./run.js";
 import type { CaptureSettings } from "./settings.js";
+import { findOnPath } from "../lib/claude-bin.js";
+import { commandPath } from "../jobs/machine/run.js";
+import { defineWords, say } from "../words.js";
+
+// PLA-I2-10: the live copy's refusals and hints in the install's language; the Spanish is unchanged.
+export const VIVO_WORDS = defineWords({
+  es: {
+    onlyHere: "Solo desde esta máquina o tu tailnet",
+    noAnswer: "La copia de la entrega no responde",
+    phoneHint: "Para abrirla en el teléfono, esta máquina necesita Tailscale (docs/phone-access.md).",
+    notOn: "la copia de la entrega no está encendida",
+    signInFailed: "No se pudo entrar con el usuario de prueba",
+  },
+  en: {
+    onlyHere: "Only from this machine or your tailnet",
+    noAnswer: "The delivery's copy does not answer",
+    phoneHint: "To open it on the phone, this machine needs Tailscale (docs/phone-access.md).",
+    notOn: "the delivery's copy is not on",
+    signInFailed: "Could not sign in with the test user",
+  },
+});
 
 export type VivoRead = {
   url: string | null; // what «Pruébala en vivo» opens (the tailnet address when there is one, else localhost)
@@ -33,6 +54,9 @@ export type VivoDeps = {
 };
 
 type Live = { slug: string; key: string | null; server: http.Server; port: number; target: number; cookies: { name: string; value: string }[]; read: VivoRead };
+// PLA-158 (F-27): the sockets each proxy passed through as an upgrade (the dev server's live reload). They are no
+// longer the HTTP server's requests, so closeAllConnections() never ends them and server.close() waited for them.
+const upgraded = new WeakMap<http.Server, Set<Socket>>();
 const lives = new Map<string, Live>();
 let deps: VivoDeps = {};
 export function setVivoDeps(d: VivoDeps): void {
@@ -54,6 +78,21 @@ export function withSession(header: string | undefined, session: { name: string;
   return [...theirs, ...[...mine].map(([n, v]) => `${n}=${v}`)].join("; ");
 }
 
+// PLA-91 (guided test PLA-86, F-15): the browser's Origin and Referer name the proxy (localhost:<proxy port>), while
+// Host is rewritten to the copy. Next.js compares Origin with Host for Server Actions and answered every form post
+// with 500 «Invalid Server Actions request», so nothing could be saved in the live copy. Both are rewritten to the
+// copy's own origin when they point at this proxy (on loopback or the tailnet); any other origin is left as it is.
+export function toCopyOrigin(value: string | undefined, proxyPort: number, target: number): string | undefined {
+  if (!value) return value;
+  try {
+    const u = new URL(value);
+    if (Number(u.port) !== proxyPort) return value;
+    return `http://localhost:${target}${value.slice(u.origin.length)}`;
+  } catch {
+    return value;
+  }
+}
+
 // A redirect to the copy's own origin becomes a path, so the browser stays on the proxy.
 export function localLocation(location: string, target: number): string {
   try {
@@ -68,10 +107,15 @@ export function localLocation(location: string, target: number): string {
 function proxy(live: Omit<Live, "server" | "port" | "read">): http.Server {
   const server = http.createServer((req, res) => {
     if (!isLoopback(req.socket.remoteAddress)) {
-      res.writeHead(403).end("Solo desde esta Mac o tu tailnet");
+      res.writeHead(403).end(say(VIVO_WORDS).onlyHere);
       return;
     }
     const headers = { ...req.headers, host: `localhost:${live.target}` } as http.OutgoingHttpHeaders;
+    const proxyPort = (req.socket.localPort ?? 0) as number;
+    for (const k of ["origin", "referer"] as const) {
+      const v = toCopyOrigin(req.headers[k], proxyPort, live.target);
+      if (v) headers[k] = v;
+    }
     const cookie = withSession(req.headers.cookie, live.cookies);
     if (cookie) headers.cookie = cookie;
     delete headers["x-forwarded-host"];
@@ -83,13 +127,17 @@ function proxy(live: Omit<Live, "server" | "port" | "read">): http.Server {
     });
     up.on("error", () => {
       if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
-      res.end("La copia de la entrega no responde");
+      res.end(say(VIVO_WORDS).noAnswer);
     });
     req.pipe(up);
   });
   // Dev servers keep a socket open for live reload: pass upgrades straight through.
+  const open = new Set<Socket>();
+  upgraded.set(server, open);
   server.on("upgrade", (req, socket: Socket, head) => {
     if (!isLoopback(socket.remoteAddress)) return socket.destroy();
+    open.add(socket);
+    socket.once("close", () => open.delete(socket));
     const up = connect(live.target, "127.0.0.1", () => {
       const lines = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
@@ -106,10 +154,11 @@ function proxy(live: Omit<Live, "server" | "port" | "read">): http.Server {
   return server;
 }
 
-// The Mac's Tailscale CLI, when there is one: `tailscale serve --bg --https=<port> <to>`, and its DNS name.
-function tailscaleBin(env: NodeJS.ProcessEnv = process.env): string | null {
-  for (const p of [env.PLANIA_TAILSCALE_BIN, "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"]) if (p && existsSync(p)) return p;
-  return null;
+// The machine's Tailscale CLI, when there is one: `tailscale serve --bg --https=<port> <to>`, and its DNS name.
+// PLA-I2-19: then the one on PATH (Linux packages put it in /usr/bin), with the usual folders added.
+export function tailscaleBin(env: NodeJS.ProcessEnv = process.env, exists: (p: string) => boolean = existsSync): string | null {
+  for (const p of [env.PLANIA_TAILSCALE_BIN, "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"]) if (p && exists(p)) return p;
+  return findOnPath("tailscale", { ...env, PATH: commandPath(env.PATH ?? "") }, exists);
 }
 const run = (bin: string, args: string[]) =>
   new Promise<{ code: number; out: string }>((resolve) =>
@@ -135,7 +184,20 @@ export function realTailscale(): Tailscale | null {
   };
 }
 
-const PHONE_HINT = "Para abrirla en el teléfono, esta Mac necesita Tailscale (docs/phone-access.md).";
+// PLA-111 (guided test PLA-86, F-33): each «encender» got a random port, so a tab or a phone bookmark from the last
+// try pointed nowhere. A project's live copy now asks for the same port every time (4300–4399 by its slug) and
+// takes any free one only when that one is busy.
+export const VIVO_BASE = 4300;
+export const vivoPort = (slug: string): number => VIVO_BASE + ([...slug].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % 100);
+const listenOn = (server: http.Server, port: number) =>
+  new Promise<boolean>((resolve, reject) => {
+    const fail = (e: NodeJS.ErrnoException) => (e.code === "EADDRINUSE" && port !== 0 ? resolve(false) : reject(e));
+    server.once("error", fail);
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", fail);
+      resolve(true);
+    });
+  });
 
 // Starts (or returns) the live copy of a project's delivery. The delivery's copy must be on (F2).
 export async function startVivo(db: Db, slug: string): Promise<VivoRead> {
@@ -147,25 +209,22 @@ export async function startVivo(db: Db, slug: string): Promise<VivoRead> {
   if (!settings) throw new ToolError("INVALID_FILTER", { field: "settings.capture", hint: "the project has no capture settings" });
   const e = entregaRead(slug);
   const target = deps.target ? deps.target(slug) : e && e.phase === "live" && e.port ? { port: e.port, worktree: e.worktree } : null;
-  if (!target) throw new ToolError("INVALID_FILTER", { field: "entrega", hint: "la copia de la entrega no está encendida" });
+  if (!target) throw new ToolError("INVALID_FILTER", { field: "entrega", hint: say(VIVO_WORDS).notOn });
 
   const user = settings.session?.user ?? null;
   let cookies: { name: string; value: string }[] = [];
   let error: string | null = null;
   if (settings.session) {
     try {
-      cookies = await (deps.signIn ?? sessionCookies)({ base_url: `http://localhost:${target.port}`, checkout: target.worktree ?? "", settings });
-      if (!cookies.length) error = "No se pudo entrar con el usuario de prueba";
+      cookies = await (deps.signIn ?? sessionCookies)({ base_url: `http://localhost:${target.port}`, checkout: target.worktree ?? "", settings, env: entregaEnv(slug) });
+      if (!cookies.length) error = say(VIVO_WORDS).signInFailed;
     } catch (err) {
       error = err instanceof Error ? err.message.split("\n")[0]!.slice(0, 200) : String(err);
     }
   }
   const base = { slug, key: e?.key ?? null, target: target.port, cookies };
   const server = proxy(base);
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
+  if (!(await listenOn(server, vivoPort(slug)))) await listenOn(server, 0);
   const port = (server.address() as AddressInfo).port;
   const local = `http://localhost:${port}`;
   const ts = deps.tailscale === undefined ? realTailscale() : deps.tailscale;
@@ -177,7 +236,7 @@ export async function startVivo(db: Db, slug: string): Promise<VivoRead> {
     signed_in: !settings.session || cookies.length > 0,
     user,
     error,
-    hint: tailnetUrl ? null : PHONE_HINT,
+    hint: tailnetUrl ? null : say(VIVO_WORDS).phoneHint,
   };
   lives.set(slug, { ...base, server, port, read });
   return read;
@@ -187,13 +246,20 @@ export function vivoRead(slug: string): VivoRead | null {
   return lives.get(slug)?.read ?? null;
 }
 
+const STOP_WAIT_MS = 2_000;
+
 // Off: the proxy closes and its tailnet entry goes. Called when the delivery's copy stops.
 export async function stopVivo(slug: string): Promise<void> {
   const l = lives.get(slug);
   if (!l) return;
   lives.delete(slug);
-  await new Promise<void>((resolve) => l.server.close(() => resolve()));
+  // PLA-158 (F-27): a tab the owner left open on the live copy holds its live-reload socket (and keep-alive
+  // requests) for as long as it stays open, and close() waited for them: a later delivery's photo pass, which stops
+  // this proxy with the old copy, waited 1266 s. Every connection is ended first, and the wait is bounded.
+  const closed = new Promise<void>((resolve) => l.server.close(() => resolve()));
   l.server.closeAllConnections?.();
+  for (const s of upgraded.get(l.server) ?? []) s.destroy();
+  await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, STOP_WAIT_MS).unref?.())]);
   const ts = deps.tailscale === undefined ? realTailscale() : deps.tailscale;
   if (ts && l.read.tailnet) await ts.off(l.port).catch(() => undefined);
 }

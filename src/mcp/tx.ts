@@ -10,15 +10,15 @@ import { ToolError } from "./errors.js";
 // A Db or an open transaction. Reads that run inside writeTx must use the transaction.
 export type Q = Db;
 
-// Who is writing and through which channel. human is true only for Jorge's screen (cookie),
+// Who is writing and through which channel. human is true only for the owner's screen (cookie),
 // never inferred from the actor value. requestId + tool make a retry replay the first response.
 // verbose: writes return the full task besides the compact {key, status, version, changed} reply.
 // system: a poller acting on GitHub or deploy data (moves In review → Merged → Released).
 // An app-repo code ticket still needs a scan pass before Merged.
-export type Ctx = { actor: Actor; human?: boolean; system?: boolean; requestId?: string; tool?: string; verbose?: boolean; tokenId?: string };
+export type Ctx = { actor: Actor; human?: boolean; system?: boolean; requestId?: string; tool?: string; verbose?: boolean; tokenId?: string; runSession?: string };
 
 
-export const WEB_ACTOR: Actor = { agent: "jorge", session_id: "web", machine: "screen" };
+export const WEB_ACTOR: Actor = { agent: "owner", session_id: "web", machine: "screen" };
 
 // A screen-session answer counts only when this actor stored it. The screen route sets it from the session
 // cookie. human on the context is never inferred from an actor a caller sent.
@@ -83,7 +83,15 @@ export async function writeTx<T>(
     throw err;
   }
   // The store's write queue is the lock: the wait is the time in the queue, the hold the time to run and commit.
-  if (lockedAt) noteWriteLock(lockedAt - asked, performance.now() - lockedAt);
+  if (lockedAt) {
+    const waitMs = lockedAt - asked;
+    const holdMs = performance.now() - lockedAt;
+    noteWriteLock(waitMs, holdMs);
+    // PLA-I73-1: in guided test 3 two release_footprint calls took 90 s each, yet the tool does a few rows of work:
+    // they waited on the one write lock behind something else. A slow wait or hold now names its tool in the log,
+    // so the next one points at the writer that held everyone up.
+    if (waitMs > SLOW_WRITE_MS || holdMs > SLOW_WRITE_MS) console.log(`[write] ${ctx.tool ?? "write"} on ${project.slug}: waited ${Math.round(waitMs / 100) / 10}s, held ${Math.round(holdMs / 100) / 10}s`);
+  }
   for (const change of changes.values()) bus.publish(change);
   return result;
 }
@@ -93,6 +101,7 @@ export async function writeTx<T>(
 const WINDOW = 2000;
 const waits: number[] = [];
 const holds: number[] = [];
+const SLOW_WRITE_MS = 5_000;
 function noteWriteLock(wait: number, hold: number): void {
   waits.push(wait);
   holds.push(hold);

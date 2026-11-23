@@ -157,9 +157,13 @@ after(async () => {
 });
 
 test("I31-1 #1a: a ticket moving to Ready queues exactly one wake, for Taller, on that ticket", async () => {
-  // Created straight into Ready is not a move: nothing queued.
+  // Created straight into Ready is not a move: an unassigned ticket queues nothing.
   await backlog("EV-NEW", { status: "Ready" });
   assert.deepEqual(await wakes(), []);
+  // PLA-103: one created Ready and given to Taller (the PO splits a «Hacerlo ya» into one) wakes Taller on it.
+  await backlog("EV-GIVEN", { status: "Ready", owner_agent: "taller" });
+  assert.deepEqual((await wakes()).map((x) => [x.agent, x.task_key]), [["taller", "EV-GIVEN"]]);
+  await store.fix((uow) => uow.delete("agentRuns", {}));
   await backlog("EV-READY");
   await toReady("EV-READY");
   const w = await wakes();
@@ -176,6 +180,101 @@ test("I31-1 #1a: a ticket moving to Ready queues exactly one wake, for Taller, o
   await backlog("EV-OWNED", { owner_agent: "research" });
   await toReady("EV-OWNED");
   assert.deepEqual(await wakes(), []);
+});
+
+test("PLA-151: an initiative turning Active wakes Taller on its first Ready step; a step born Ready under an Active one does too", async () => {
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await writes.createTask(db, { project: "micasa", kind: "initiative", key: "EV-INI", title: "Catálogo", scope: "Plan" } as never, ctx);
+  await backlog("EV-S1", { parent_key: "EV-INI", phase: 1, status: "Ready" });
+  await backlog("EV-S2", { parent_key: "EV-INI", phase: 2, blocked_by: ["EV-S1"] });
+  assert.deepEqual(await wakes(), [], "steps filed under a Planning initiative wake nobody");
+  const { version } = (await store.get("tasks", { key: "EV-INI" }))!;
+  await writes.setTask(db, { project: "micasa", key: "EV-INI", status: "Active", version } as never, ctx);
+  const w = await wakes();
+  assert.deepEqual(w.map((x) => [x.agent, x.task_key]), [["taller", "EV-S1"]]);
+  assert.match(w[0]!.summary, /initiative EV-INI started/);
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await backlog("EV-S3", { parent_key: "EV-INI", phase: 3, status: "Ready" });
+  assert.deepEqual((await wakes()).map((x) => [x.agent, x.task_key]), [["taller", "EV-S3"]], "born Ready under an Active initiative");
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await backlog("EV-S4", { parent_key: "EV-INI", phase: 4, status: "Ready", blocked_by: ["EV-S2"] });
+  assert.deepEqual(await wakes(), [], "a blocked step still waits for its landing");
+});
+
+test("PLA-164: after «Constrúyelo» the idea's promotion wakes Taller on step 1, even with the initiative still Planning", async () => {
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  const idea = await writes.createTask(db, { project: "micasa", kind: "idea", title: "Cómo llegar" } as never, ctx);
+  const ideaKey = (idea as { key: string }).key;
+  const pid = await id("projects", "micasa");
+  await store.fix(async (uow) => {
+    const t = (await uow.get("tasks", { key: ideaKey }))!;
+    await uow.insert("events", { projectId: pid, taskId: t.id, taskKey: t.key, type: "pedido.construir", actor: { agent: "owner", session_id: "web" }, payload: {} });
+  });
+  await writes.createTask(db, { project: "micasa", kind: "initiative", key: "EV-BUILT", title: "Cómo llegar", scope: "Plan" } as never, ctx);
+  await backlog("EV-B1", { parent_key: "EV-BUILT", phase: 1, status: "Ready" });
+  assert.deepEqual(await wakes(), [], "before the promotion the initiative is just Planning");
+  const { version } = (await store.get("tasks", { key: ideaKey }))!;
+  await writes.setTask(db, { project: "micasa", key: ideaKey, promoted_to: "EV-BUILT", version } as never, ctx);
+  const w = await wakes();
+  assert.deepEqual(w.map((x) => [x.agent, x.task_key]), [["taller", "EV-B1"]]);
+  assert.match(w[0]!.summary, /built from/);
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await backlog("EV-B2", { parent_key: "EV-BUILT", phase: 2, status: "Ready" });
+  assert.deepEqual((await wakes()).map((x) => [x.agent, x.task_key]), [["taller", "EV-B2"]], "a later step born Ready under it wakes Taller too");
+});
+
+test("PLA-164: an ordinary Planning initiative (no «Constrúyelo») still wakes nobody on a step born Ready", async () => {
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await writes.createTask(db, { project: "micasa", kind: "initiative", key: "EV-PLAIN", title: "Otro plan", scope: "Plan" } as never, ctx);
+  await backlog("EV-P1", { parent_key: "EV-PLAIN", phase: 1, status: "Ready" });
+  assert.deepEqual(await wakes(), []);
+});
+
+test("PLA-167: a note on a step an ended run still holds frees it and wakes Taller with the note; a live run is left alone", async () => {
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await backlog("EV-NOTE", { status: "Ready" });
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await writes.claim(db, { project: "micasa", key: "EV-NOTE" } as never, { actor: { agent: "plania-runner", session_id: "run-0b4b01d4271a4e8f", machine: "m" } } as never);
+  const { noteForAgent } = await import("../src/api/company-runs.js");
+  const out = await noteForAgent(db, "micasa", "EV-NOTE", "Arregla la prueba inestable y vuelve a entregar.");
+  assert.deepEqual(out, { noted: true, woke: true });
+  assert.equal((await store.get("tasks", { key: "EV-NOTE" }))!.status, "Ready", "the ended run's lease is released");
+  const w = await wakes();
+  assert.deepEqual(w.map((x) => [x.agent, x.task_key]), [["taller", "EV-NOTE"]]);
+  assert.match(w[0]!.summary, /note from the owner: Arregla la prueba inestable/);
+  // While a run is queued or running on the step, the note waits for its next step: nothing more is queued.
+  const again = await noteForAgent(db, "micasa", "EV-NOTE", "Otra cosa.");
+  assert.deepEqual(again, { noted: true, woke: false });
+  assert.equal((await wakes()).length, 1);
+});
+
+test("PLA-167: a person's own lease is never released by a note", async () => {
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await backlog("EV-NOTE2", { status: "Ready" });
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await writes.claim(db, { project: "micasa", key: "EV-NOTE2" } as never, { actor: { agent: "Claude Code", session_id: "cc-someone-working", machine: "m" } } as never);
+  const { noteForAgent } = await import("../src/api/company-runs.js");
+  assert.deepEqual(await noteForAgent(db, "micasa", "EV-NOTE2", "Hola."), { noted: true, woke: false });
+  assert.equal((await store.get("tasks", { key: "EV-NOTE2" }))!.status, "In progress");
+});
+
+test("PLA-155: a PO run that leaves its ticket In progress with uncommitted code hands it to Taller, who wakes", async () => {
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await backlog("EV-PO", { status: "Ready", owner_agent: "housi" });
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await writes.claim(db, { project: "micasa", key: "EV-PO" } as never, { actor: { agent: "plania-runner", session_id: "run-0a4a01d4271a4e8f", machine: "m" } } as never);
+  const p = (await store.get("projects", { slug: "micasa" }))!;
+  const clean = async () => ({ code: 0, stdout: "", stderr: "" });
+  assert.equal(await runner.handPoCodeToTaller(db, p, "EV-PO", "/tmp/x", clean), false, "nothing uncommitted: left alone");
+  const dirty = async () => ({ code: 0, stdout: " M src/app/foto.tsx\n?? src/app/nueva.tsx\n", stderr: "" });
+  assert.equal(await runner.handPoCodeToTaller(db, p, "EV-PO", "/tmp/x", dirty), true);
+  const row = (await store.get("tasks", { key: "EV-PO" }))!;
+  const ownerSlug = row.ownerAgent ? (await store.get("agents", { id: row.ownerAgent }))?.slug : undefined;
+  assert.deepEqual([row.status, ownerSlug], ["Ready", "taller"]);
+  const note = (await store.find("events", { type: "note", taskKey: "EV-PO" }, { orderBy: [{ column: "id", desc: true }], limit: 1 }))[0]!;
+  assert.match(note.payload.text as string, /src\/app\/foto\.tsx, src\/app\/nueva\.tsx/);
+  assert.deepEqual((await wakes()).map((x) => [x.agent, x.task_key]), [["taller", "EV-PO"]], "Taller wakes on it");
+  assert.equal(await runner.handPoCodeToTaller(db, p, "EV-PO", "/tmp/x", dirty), false, "not In progress any more: once");
 });
 
 test("I31-1 #1b: a question answered wakes whoever asked it (a runner session, or a roster slug)", async () => {
@@ -584,8 +683,8 @@ const { writeTx, WEB_ACTOR } = await import("../src/mcp/tx.js");
 const MAX_TURNS = "fail: error_max_turns (41 turns, session 491bc14d)";
 
 // The ticket In progress, leased to the runner session of that run (run-<first 8 of its id>).
-async function leaseTo(key: string, runId: string, lease = inMinutes(110)): Promise<void> {
-  const owner = { agent: "plania-runner", session_id: `run-${runId.slice(0, 8)}`, machine: "test" };
+async function leaseTo(key: string, runId: string, lease = inMinutes(110), session = `run-${runId.slice(0, 8)}`): Promise<void> {
+  const owner = { agent: "plania-runner", session_id: session, machine: "test" };
   await store.fix((uow) => uow.update("tasks", { key }, { status: "In progress", owner, claimedAt: minutesAgo(9), leaseUntil: lease }));
 }
 // A Taller run on the ticket that ended (fail by default) and still holds its lease.
@@ -610,6 +709,17 @@ const failQueued = async (summary: string): Promise<string> => {
   const now = new Date();
   return (await store.fix((uow) => uow.update("agentRuns", { status: "queued" }, { status: "fail", summary, startedAt: now, endedAt: now })))[0]!.id;
 };
+
+test("PLA-95: a run that wrote as run-<16 hex> (PLA-I60-1) is found too: its ticket is freed and retried", async () => {
+  await backlog("FR-N16");
+  const run = await endedRunHolding("FR-N16");
+  await leaseTo("FR-N16", run, inMinutes(110), `run-${run.replace(/-/g, "").slice(0, 16)}`);
+  assert.deepEqual(await sweepFailedRuns(db), { retried: 1, held: 0 });
+  const t = await ticket("FR-N16");
+  assert.deepEqual([t.status, t.owner], ["Ready", null]);
+  assert.match((await eventsOf("FR-N16", "claim.released"))[0].owner.session_id, /^run-[0-9a-f]{16}$/);
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+});
 
 test("PLA-16 #1, #2: a failed run frees its ticket and the same agent is queued on it once; the second failure in a row goes to Jorge", async () => {
   assert.equal(failureWords(MAX_TURNS), "error_max_turns (41 turns)");
@@ -637,7 +747,7 @@ test("PLA-16 #1, #2: a failed run frees its ticket and the same agent is queued 
   assert.deepEqual(await sweepFailedRuns(db), { retried: 0, held: 1 });
   t = await ticket("FR-A1");
   assert.deepEqual([t.status, t.owner, t.lease_until], ["Blocked", null, null]);
-  assert.match(t.blocked_note, /^Jorge: Taller falló dos veces seguidas en este paso \(error_max_turns \(41 turns\)\)/);
+  assert.match(t.blocked_note, /^Owner: Taller falló dos veces seguidas en este paso \(error_max_turns \(41 turns\)\)/);
   assert.deepEqual(await wakes(), []);
   assert.equal((await eventsOf("FR-A1", "claim.released"))[1].reason, "run failed twice");
   const steps = (await store.find("blockers", { taskId: t.id, type: "human_action" })).map((b) => ({ id: b.id, spec: b.spec, satisfied_at: b.satisfiedAt }));
@@ -696,7 +806,7 @@ test("PLA-16: the heartbeat tick sweeps the failed run and starts its retry in t
   await endedRunHolding("FR-D1");
   const f = fakes();
   const counts = await runHeartbeat(db, new Date(), { runner: f.deps as never });
-  assert.deepEqual([counts.retried_after_fail, counts.handed_to_jorge, counts.started_from_queue], [1, 0, 1]);
+  assert.deepEqual([counts.retried_after_fail, counts.handed_to_owner, counts.started_from_queue], [1, 0, 1]);
   assert.equal(f.spawned.length, 1);
   // (PLA-I60-4: the same tick may also queue a retry for an idea an earlier test left in a stage with no run.)
   const running = (await wakes()).filter((x) => x.agent === "taller");
@@ -773,6 +883,33 @@ test("PLA-21: a run a budget stopped before PLA-21 frees its ticket with a note 
   assert.equal((await eventsOf("BS-A1", "wake.queued"))[0].from_event, "run.held");
   assert.deepEqual(await requeueHeld(db), { requeued: 0 }, "the queued run is now the newest");
   assert.deepEqual(await sweepStoppedRuns(db), { freed: 0 });
+});
+
+test("PLA-56: with the override on, a plan-guard skip is queued again once the «rejected» window has reset", async () => {
+  await backlog("PG-A1", { status: "Ready" });
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  const [agentId, projectId] = [await id("agents", "taller"), await id("projects", "micasa")];
+  await store.fix((uow) =>
+    uow.insert("agentRuns", { agentId, projectId, taskKey: "PG-A1", role: "taller", status: "skipped", summary: "skipped: plan guard (status rejected, resetsAt x)", trigger: "event", queuedAt: minutesAgo(20), endedAt: minutesAgo(20) }),
+  );
+  await runnerSettings({ guardOverride: true });
+  const readingAt = (hoursAgo: number, resetsInHours: number) =>
+    store.fix(async (uow) => {
+      await uow.delete("planReadings", {});
+      await uow.insert("planReadings", { at: new Date(Date.now() - hoursAgo * 3_600_000), source: "stream", status: "rejected", fiveHourPct: 100, fiveHourResetsAt: new Date(Date.now() + resetsInHours * 3_600_000) });
+    });
+  try {
+    // The window is still closed: nothing.
+    await readingAt(1, 1);
+    assert.deepEqual(await requeueHeld(db), { requeued: 0 });
+    // The last reading is the morning's, its reset long past (MIA-I7-2, 2026-11-17): queued again, once.
+    await readingAt(10, -8);
+    assert.deepEqual(await requeueHeld(db), { requeued: 1 });
+    assert.deepEqual((await wakes()).map((x) => [x.agent, x.task_key, x.summary]), [["taller", "PG-A1", "queued: event plan has room again"]]);
+    assert.deepEqual(await requeueHeld(db), { requeued: 0 }, "once");
+  } finally {
+    await runnerSettings({ guardOverride: false });
+  }
 });
 
 test("PLA-18: a switch stop frees the ticket and the work is queued again on resume; Jorge's Detener is not", async () => {
@@ -859,4 +996,140 @@ test("PLA-18 #3: Seguir on a run a budget stopped releases its lease and wakes t
   assert.equal((await eventsOf("BS-F1", "claim.released"))[0].owner.session_id, `run-${run.slice(0, 8)}`);
   f.spawned[0]!.finish();
   await runner.waitForAllRuns();
+});
+
+// ---- PLA-I73-2: stacked steps. A step whose one blocker is delivered (In review, with a branch) starts on top of it.
+const stack = await import("../src/runner/stack.js");
+const writeTxSweep = async () => {
+  const { promoteDue: due } = await import("../src/jobs/blockers.js");
+  await due(db);
+};
+const deliver = async (key: string, branch: string) => {
+  await store.fix((uow) => uow.update("tasks", { key }, { status: "In review", branch }));
+  await writeTxSweep();
+};
+const taskId = async (key: string) => (await store.get("tasks", { key }))!.id;
+// settings.velocidad of micasa: set (jsonb_set / ||), or removed with null.
+const setVelocidad = (v: Record<string, unknown> | null) =>
+  store.fix(async (uow) => {
+    const p = (await uow.get("projects", { slug: "micasa" }))!;
+    const { velocidad: _old, ...rest } = p.settings;
+    await uow.update("projects", { id: p.id }, { settings: (v ? { ...rest, velocidad: v } : rest) as typeof p.settings });
+  });
+
+test("PLA-I73-2 #1: a step behind one delivered step goes Ready, wakes Taller and is cut from that step's branch", async () => {
+  const i = await leg("Active");
+  await backlog("ST-A1", { parent_key: i, phase: 1, status: "Ready" });
+  await backlog("ST-A2", { parent_key: i, phase: 2, blocked_by: ["ST-A1"] });
+  await backlog("ST-A3", { parent_key: i, phase: 3, blocked_by: ["ST-A2"] });
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  await deliver("ST-A1", "plania/st-a1");
+  assert.equal(await statusOf("ST-A2"), "Ready");
+  assert.equal(await statusOf("ST-A3"), "Backlog", "only one step ahead: ST-A2 has not been delivered");
+  assert.deepEqual((await wakes()).map((x) => [x.agent, x.task_key]), [["taller", "ST-A2"]]);
+  assert.deepEqual(await stack.stackBaseOf(db, await taskId("ST-A2")), { key: "ST-A1", title: "Ticket ST-A1", branch: "plania/st-a1", status: "In review" });
+  // Not accepted before the step under it.
+  assert.equal((await stack.stackHold(db, await taskId("ST-A2")))?.key, "ST-A1");
+  await land("ST-A1");
+  assert.equal(await stack.stackHold(db, await taskId("ST-A2")), null);
+  assert.equal(await stack.stackBaseOf(db, await taskId("ST-A2")), null, "once landed, the start branch has its code");
+});
+
+test("PLA-I73-2 #2: no stacking with apilar off, with no branch, or behind two open steps", async () => {
+  const i = await leg("Active");
+  await backlog("ST-B1", { parent_key: i, status: "Ready" });
+  await backlog("ST-B2", { parent_key: i, blocked_by: ["ST-B1"] });
+  await store.fix((uow) => uow.update("tasks", { key: "ST-B1" }, { status: "In review" })); // no branch
+  await backlog("ST-C1", { parent_key: i, status: "Ready" });
+  await backlog("ST-C2", { parent_key: i, status: "Ready" });
+  await backlog("ST-C3", { parent_key: i, blocked_by: ["ST-C1", "ST-C2"] });
+  await store.fix((uow) => uow.update("tasks", { key: "ST-C1" }, { status: "In review", branch: "plania/st-c1" }));
+  await writeTxSweep();
+  assert.equal(await statusOf("ST-B2"), "Backlog");
+  assert.equal(await statusOf("ST-C3"), "Backlog", "two steps still open under it");
+
+  await setVelocidad({ apilar: false });
+  try {
+    await backlog("ST-D1", { parent_key: i, status: "Ready" });
+    await backlog("ST-D2", { parent_key: i, blocked_by: ["ST-D1"] });
+    await deliver("ST-D1", "plania/st-d1");
+    assert.equal(await statusOf("ST-D2"), "Backlog", "apilar off waits for the merge as before");
+  } finally {
+    await setVelocidad(null);
+  }
+});
+
+test("PLA-I73-2 #3: a step sent back from review leaves a note on the step stacked on it", async () => {
+  const i = await leg("Active");
+  await backlog("ST-E1", { parent_key: i, status: "Ready" });
+  await backlog("ST-E2", { parent_key: i, blocked_by: ["ST-E1"] });
+  await deliver("ST-E1", "plania/st-e1");
+  assert.equal(await statusOf("ST-E2"), "Ready");
+  await move("ST-E1", "Ready");
+  const notes = (await store.find("events", { taskKey: "ST-E2", type: "note" }, { orderBy: [{ column: "id" }] })).map((r) => r.payload.text as string);
+  assert.ok(notes.some((t) => /volvió a Taller/.test(t) && t.includes("ST-E1")), JSON.stringify(notes));
+});
+
+// ---- PLA-I73-6: the early skeleton and the step's effort.
+const { deliverStage } = await import("../src/mcp/stage-docs.js");
+const { resolveMotor } = await import("../src/runner/motor.js");
+const planData = (esqueleto: boolean) => ({
+  steps: [
+    { title: "El esqueleto del catálogo", done_when: "Las tablas del catálogo existen y las pantallas vacías abren sin error", try_it: "Abre el panel y la ruta del catálogo y mira las pantallas vacías", ...(esqueleto ? { esqueleto: true, effort: "high" } : {}) },
+    { title: "La novia hojea el catálogo", done_when: "La novia ve la revista con fotos grandes desde el enlace de su cita", try_it: "Abre el enlace de una cita de prueba y recorre la revista", depends_on: [0], files: ["src/app/catalogo/**"] },
+  ],
+  risks: ["Las fotos pueden pesar"],
+});
+
+test("PLA-I73-6 #1: a plan whose first step is the skeleton wakes Taller on the idea; step 1 then starts from that branch", async () => {
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  const idea = (await writes.createTask(db, { project: "micasa", kind: "idea", title: "Catálogo temprano", scope: "s" } as never, ctx)) as { key: string };
+  await store.fix((uow) => uow.update("tasks", { key: idea.key }, { stage: "planning" }));
+  const r = (await deliverStage(db, { project: "micasa", key: idea.key, stage: "planning", data: planData(true) } as never, ctx)) as { early_skeleton?: string };
+  assert.ok(r.early_skeleton, JSON.stringify(r));
+  const w = await wakes();
+  assert.deepEqual(w.map((x) => [x.agent, x.task_key]), [["taller", idea.key]]);
+  assert.match((await store.find("agentRuns", { taskKey: idea.key }))[0]!.summary, /early skeleton/);
+
+  // «Constrúyelo»: the initiative and its tickets; step 1 adopts the early branch, step 2 gets its blocker and files.
+  const i = await leg("Active");
+  await store.fix((uow) => uow.update("tasks", { key: idea.key }, { promotedTo: i }));
+  await backlog("EK-1", { parent_key: i, phase: 1, status: "Ready" });
+  await backlog("EK-2", { parent_key: i, phase: 2 });
+  const s1 = await stack.earlyBaseOf(db, await taskId("EK-1"));
+  assert.equal(s1?.branch, r.early_skeleton);
+  assert.equal(await stack.earlyBaseOf(db, await taskId("EK-2")), null, "only step 1");
+  const ek2 = (await store.get("tasks", { key: "EK-2" }))!;
+  const blockerIds = (await store.find("taskBlockers", { taskId: ek2.id })).map((b) => b.blockerId);
+  const blockers = (await store.find("tasks", { id: blockerIds })).map((b) => b.key);
+  assert.deepEqual(blockers, ["EK-1"], "blocked_by filled from depends_on");
+  assert.deepEqual(ek2.areas, ["src/app/catalogo/**"], "areas filled from files");
+
+  // A new plan version: the early branch no longer counts.
+  await deliverStage(db, { project: "micasa", key: idea.key, stage: "planning", data: planData(false) } as never, ctx);
+  assert.equal(await stack.earlyBaseOf(db, await taskId("EK-1")), null);
+});
+
+test("PLA-I73-6 #2: no early run when the plan has no skeleton or the project turned it off", async () => {
+  await store.fix((uow) => uow.delete("agentRuns", {}));
+  const a = (await writes.createTask(db, { project: "micasa", kind: "idea", title: "Sin esqueleto", scope: "s" } as never, ctx)) as { key: string };
+  const r = (await deliverStage(db, { project: "micasa", key: a.key, stage: "planning", data: planData(false) } as never, ctx)) as { early_skeleton?: string };
+  assert.equal(r.early_skeleton, undefined);
+  await setVelocidad({ esqueleto_temprano: false });
+  try {
+    const b = (await writes.createTask(db, { project: "micasa", kind: "idea", title: "Apagado", scope: "s" } as never, ctx)) as { key: string };
+    const r2 = (await deliverStage(db, { project: "micasa", key: b.key, stage: "planning", data: planData(true) } as never, ctx)) as { early_skeleton?: string };
+    assert.equal(r2.early_skeleton, undefined);
+    assert.deepEqual(await wakes(), []);
+  } finally {
+    await setVelocidad(null);
+  }
+});
+
+test("PLA-I73-6 #3: a step's effort wins over the seat's, never over a question's", () => {
+  const base = { seat: { model: "claude-sonnet-5-5", effort: "medium", consultaEffort: "low" }, company: { model: null, effort: null } };
+  assert.equal(resolveMotor({ ...base, stepEffort: "high" }).effort, "high");
+  assert.equal(resolveMotor({ ...base, stepEffort: "high" }).source.effort, "step");
+  assert.equal(resolveMotor({ ...base, stepEffort: null }).effort, "medium");
+  assert.equal(resolveMotor({ ...base, consulta: true, stepEffort: "high" }).effort, "low");
 });

@@ -14,6 +14,9 @@ import {
   writeReply,
   type WriteWarning,
 } from "./queries.js";
+import { stackedOn } from "../runner/stack.js";
+import { planDefaults } from "./plan-step.js";
+import { defineWords, say } from "../words.js";
 import { parseBlockers, promoteUnblocked, replaceBlockers, resolveTaskBlockers, unsatisfiedBlockers, type BlockerInput } from "./blockers.js";
 import { LEGACY_APPROVAL_HINT, assertDelegationHourlyCap, delegationEnabled, parseDelegationEvidence } from "./delegate.js";
 import { assertBranchName, assertTicketBranch, registerIntegrationBranch } from "./branches.js";
@@ -21,9 +24,10 @@ import { assertChecksClosed, replaceChecks, tickDerived, type CheckInput } from 
 import { hasDoc } from "./docs.js";
 import { liveTaskFootprint } from "./footprint-read.js";
 import { assertReviewEvidence } from "./evidence.js";
-import { syncJorgeLines, withdrawParsedBlocker, type ParsedField } from "./jorge-lines.js";
+import { syncOwnerLines, withdrawParsedBlocker, type ParsedField } from "./owner-lines.js";
+import { readOldSpellings } from "../owner.js";
 import { resolveInitiativeGoal } from "./goals.js";
-import { assertForwardStage, assertStageMove } from "./ideas.js";
+import { assertForwardStage, assertStageMove, assertStageOwner } from "./ideas.js";
 import { addAlias, assignKey } from "./keys.js";
 import { GATED_STATUSES, SEVERITIES, TERMINAL, WORK_TYPES, actionForMove, assertTransition } from "./lifecycle.js";
 import { markHeadlineStale } from "./project.js";
@@ -99,7 +103,7 @@ async function findTaskById(tx: Q, id: string): Promise<Task> {
 // Fields that end a lease. Clearing them is part of any move out of In progress.
 const NO_LEASE = { owner: null, claimedAt: null, leaseUntil: null } as const;
 
-// While another session holds a live lease, only its owner (or Jorge on screen) changes the task.
+// While another session holds a live lease, only its owner (or the owner on screen) changes the task.
 function checkOwner(t: Task, ctx: Ctx): void {
   const owner = liveOwner(t);
   if (owner && owner.session_id !== ctx.actor.session_id && !ctx.human) {
@@ -107,8 +111,17 @@ function checkOwner(t: Task, ctx: Ctx): void {
   }
 }
 
-async function addNote(emit: Emit, t: Task, note: string | undefined): Promise<void> {
-  if (note?.trim()) await emit("note", t, { text: note });
+// PLA-I2-10: the fields only the screen puts on a note (set_task from an agent never carries them).
+function screenNoteFields(input: { owner_changes?: string; note_kind?: string; note_words?: string }): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (input.owner_changes?.trim()) out.owner_changes = input.owner_changes.trim();
+  if (input.note_kind?.trim()) out.kind = input.note_kind.trim();
+  if (input.note_words !== undefined) out.words = input.note_words.trim();
+  return out;
+}
+
+async function addNote(emit: Emit, t: Task, note: string | undefined, extra: Record<string, unknown> = {}): Promise<void> {
+  if (note?.trim()) await emit("note", t, { text: note, ...extra });
 }
 
 // A field that belongs to the other kind (priority on an initiative, next_action on a ticket...).
@@ -147,7 +160,7 @@ export type CreateInput = {
   summary?: string;
   parent_key?: string | null;
   priority?: string;
-  origin?: "chartered" | "discovered" | "jorge";
+  origin?: "chartered" | "discovered" | "owner";
   blocked_by?: BlockerInput[];
   status?: string;
   work_type?: string;
@@ -166,6 +179,8 @@ export type CreateInput = {
   due_on?: string | null;
   owner_agent?: string | null;
   goal_id?: string | null;
+  /** PLA-I2-10: the screen only (ctx.human): the words the owner typed for an order, kept as a field (tasks.owner_words). */
+  owner_words?: string;
 };
 
 // 2.8: a due date is a calendar date, YYYY-MM-DD; null clears it.
@@ -205,8 +220,8 @@ function templateWarnings(input: CreateInput, kind: string): string[] {
   }
   if (kind === "idea") return warnings;
   const workType = input.work_type ?? "code";
-  // 2.12: Jorge's request is a sentence; the agent that takes it writes the scope and the checks.
-  if (input.origin === "jorge") return warnings;
+  // 2.12: the owner's request is a sentence; the agent that takes it writes the scope and the checks.
+  if (input.origin === "owner") return warnings;
   if (!input.scope?.trim()) missing.push("scope");
   if (NEEDS_CHECKS.includes(workType) && !input.checks?.some((c) => c.trim())) missing.push("checks");
   if (missing.length) throw new ToolError("TEMPLATE_INVALID", { missing, work_type: workType });
@@ -219,7 +234,7 @@ function templateWarnings(input: CreateInput, kind: string): string[] {
 export async function createTaskInTx(tx: Q, emit: Emit, p: Project, input: CreateInput, ctx: Ctx) {
   rejectBody(input);
   checkPhase(input.phase);
-  if (input.origin === "jorge" && !ctx.human) throw new ToolError("RESERVED_ACTOR", { field: "origin" });
+  if (input.origin === "owner" && !ctx.human) throw new ToolError("RESERVED_ACTOR", { field: "origin" });
   const blockedBy = parseBlockers(input.blocked_by ?? []);
   const kind = input.kind ?? "ticket";
   const warnings: WriteWarning[] = templateWarnings(input, kind);
@@ -248,6 +263,15 @@ export async function createTaskInTx(tx: Q, emit: Emit, p: Project, input: Creat
   const parent = kind === "idea" || !input.parent_key ? undefined : await resolveParent(tx, p.id, input.parent_key);
   const assigned = await assignKey(tx, p, kind, parent, input.key);
   warnings.push(...assigned.warnings);
+  // PLA-I73-5: a step of a plan that names its dependencies and files gets them when the PO filed none.
+  let planAreas: string[] | null = null;
+  if (kind === "ticket" && parent && input.phase && !input.blocked_by?.length) {
+    const d = await planDefaults(tx, p.id, parent, input.phase);
+    if (d) {
+      blockedBy.keys.push(...d.blockers.filter((k) => !blockedBy.keys.includes(k)));
+      if (!input.areas?.length && d.areas.length) planAreas = d.areas;
+    }
+  }
   const blockerIds = await resolveTaskBlockers(tx, p.id, blockedBy.keys, assigned.key);
   const common = {
     dueOn: checkDueOn(input.due_on) ?? null,
@@ -258,8 +282,9 @@ export async function createTaskInTx(tx: Q, emit: Emit, p: Project, input: Creat
     summary: input.summary ?? "",
     scope: input.scope ?? "",
     status,
-    areas: normalizeAreas(input.areas) ?? [],
+    areas: normalizeAreas(input.areas) ?? planAreas ?? [],
     ownerAgent: input.owner_agent ? await requireAgentId(tx, input.owner_agent) : null,
+    ownerWords: ctx.human && input.owner_words?.trim() ? input.owner_words.trim() : null,
   };
   const goalId = kind === "initiative" && input.goal_id !== undefined ? await resolveInitiativeGoal(tx, p.id, input.goal_id) : null;
   const uow = uowOf(tx);
@@ -293,7 +318,7 @@ export async function createTaskInTx(tx: Q, emit: Emit, p: Project, input: Creat
   if (await uow.get("tasks", { projectId: p.id, key: assigned.key })) throw new ToolError("KEY_EXISTS");
   const t = await uow.insert("tasks", values);
   await replaceBlockers(tx, t.id, blockerIds, blockedBy.typed);
-  warnings.push(...(await syncJorgeLines(tx, emit, t, parsedTexts(t))));
+  warnings.push(...(await syncOwnerLines(tx, emit, t, parsedTexts(t))));
   await replaceChecks(tx, t.id, (input.checks ?? []).map((text) => ({ text })));
   if (integrationBranch) await registerIntegrationBranch(tx, emit, p, t, integrationBranch, input);
   await emit("task.created", t, { kind, status, parent_key: parent?.key ?? null, key_assigned: assigned.assigned });
@@ -305,7 +330,7 @@ export async function createTask(db: Db, input: CreateInput, ctx: Ctx) {
   return writeTx(db, p, ctx, (tx, emit) => createTaskInTx(tx, emit, p, input, ctx));
 }
 
-// 2.10: the free-text fields a "Jorge:" line is parsed from, as they stand on the row. Every write
+// 2.10: the free-text fields an "Owner:" line is parsed from, as they stand on the row. Every write
 // resyncs them all, so one write of any kind turns an old line into a blocker.
 function parsedTexts(t: Task, note?: string): Partial<Record<ParsedField, string | null>> {
   return {
@@ -400,7 +425,7 @@ export type SetTaskInput = {
   approval_id?: string;
   /** Required when the status move is Won't do or a reopen. */
   reason?: string;
-  delegated_by_jorge?: { message_id?: string; quote?: string };
+  delegated_by_owner?: { message_id?: string; quote?: string };
   withdraw_blocker?: string;
   integration_branch?: string;
   share_branch?: boolean;
@@ -414,6 +439,13 @@ export type SetTaskInput = {
   state_note?: string;
   due_on?: string | null;
   no_pr_reason?: string;
+  /** PLA-I2-10: the screen only (ctx.human): the owner's request for changes, kept as a field on the note event
+   * (payload.owner_changes) so the runner finds it without reading the note's words. */
+  owner_changes?: string;
+  /** PLA-I2-10: the screen only (ctx.human): what kind of note the screen writes (screen, dropped, answer, build) and
+   * the owner's own words in it, as fields on the note event, so the trail never reads the note's sentence back. */
+  note_kind?: string;
+  note_words?: string;
   stage?: string;
   promoted_to?: string | null;
   owner_agent?: string | null;
@@ -441,14 +473,22 @@ async function promotedTarget(tx: Q, projectId: string, idea: Task, key: string)
   return target.key;
 }
 
-// An initiative closes only once every ticket of it is Done or Won't do (Jorge included).
+// An initiative closes only once every ticket of it is Done or Won't do (The owner included).
 async function assertChildrenClosed(tx: Q, t: Task): Promise<void> {
   const children = await readerOf(tx).find("tasks", { parentId: t.id }, { orderBy: [{ column: "key" }] });
   const open = children.filter((c) => c.status !== "Done" && c.status !== "Won't do");
   if (open.length) throw new ToolError("INITIATIVE_CHILDREN_OPEN", { open: open.map((c) => c.key) });
 }
 
-export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskInput, ctx: Ctx) {
+// PLA-I73-2: the note on a step stacked on one that went back to Taller.
+export const STACK_WORDS = defineWords({
+  es: { sentBack: (key: string) => `El paso de abajo (${key}) volvió a Taller. Cuando lo entregue de nuevo, actualiza esta rama encima de la suya antes de entregar.` },
+  en: { sentBack: (key: string) => `The step under this one (${key}) went back to Taller. Once it is delivered again, rebase this branch onto its branch before delivering.` },
+});
+
+export async function setTaskInTx(tx: Q, emit: Emit, p: Project, raw: SetTaskInput, ctx: Ctx) {
+  // PLA-I2-14: the old field and status spellings still read, with an OLD_SPELLING warning.
+  const { input, warnings: oldSpellings } = readOldSpellings(raw);
   rejectBody(input);
   checkPhase(input.phase);
   const blockedBy = input.blocked_by !== undefined ? parseBlockers(input.blocked_by) : undefined;
@@ -459,9 +499,13 @@ export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskI
     version: _v,
     approval_id: legacyApproval,
     reason: _reason,
-    delegated_by_jorge: _evidence,
+    delegated_by_owner: _evidence,
     withdraw_blocker: _w,
     no_pr_reason: _r,
+    // PLA-I2-10: fields on the note, not on the task: a note alone stays an append.
+    owner_changes: _oc,
+    note_kind: _nk,
+    note_words: _nw,
     ...fields
   } = input;
   const legacyHint = typeof legacyApproval === "string" && legacyApproval.trim() ? LEGACY_APPROVAL_HINT : undefined;
@@ -475,9 +519,9 @@ export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskI
   const needed = input.status !== undefined && input.status !== t.status ? actionForMove(t.status, input.status) : null;
   // Evidence is the authorization, so a bot that does not hold the lease may still make this one move.
   let delegated: { messageId: string; quote: string } | undefined;
-  if (needed && !ctx.human && !ctx.system && input.delegated_by_jorge) {
+  if (needed && !ctx.human && !ctx.system && input.delegated_by_owner) {
     if (!(await delegationEnabled(tx))) throw new ToolError("DELEGATION_OFF");
-    delegated = parseDelegationEvidence(input.delegated_by_jorge);
+    delegated = parseDelegationEvidence(input.delegated_by_owner);
     await assertDelegationHourlyCap(tx);
   }
   if (!noteOnly && !ctx.system && !delegated) checkOwner(t, ctx);
@@ -521,16 +565,28 @@ export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskI
     if (t.kind !== "idea") throw new ToolError("FIELD_NOT_ALLOWED", { field: "stage", kind: t.kind });
     if (t.status === "Done" || t.status === "Won't do") throw new ToolError("IDEA_CLOSED", { status: t.status });
     const step = assertStageMove(t.stage, input.stage, input.note);
+    if (step !== "same" && !ctx.human && !ctx.system) {
+      // Loaded here: the runner's modules import this one.
+      const [{ agentOfCtx }, { roleOf }] = await Promise.all([import("../runner/events.js"), import("../runner/limits.js")]);
+      const agent = await agentOfCtx(tx, ctx);
+      assertStageOwner(agent ? roleOf(agent) : null, t.stage);
+    }
     if (step === "forward") await assertForwardStage(tx, t.id, t.stage ?? "", input.stage);
+    // PLA-149: a run older than the owner's last words on the idea does not move it on; deliver_stage woke it again.
+    if (step === "forward" && !ctx.human && !ctx.system) {
+      const { ownerNewerThanRun } = await import("./stage-docs.js");
+      const late = await ownerNewerThanRun(tx, ctx, t.id);
+      if (late) throw new ToolError("IDEA_OWNER_NEWER", { stage: t.stage, since: late.since, words: late.words, hint: "the owner wrote after your run started: read his words, deliver the stage again from the next run, then move it" });
+    }
     if (step !== "same") patch.stage = input.stage;
   }
   if (input.promoted_to !== undefined) {
     if (t.kind !== "idea") throw new ToolError("FIELD_NOT_ALLOWED", { field: "promoted_to", kind: t.kind });
     if (t.status === "Done" || t.status === "Won't do") throw new ToolError("IDEA_CLOSED", { status: t.status });
     // PLA-I54-4: the owner's request (Darle forma) passes the valve only on his «Constrúyelo» (event pedido.construir).
-    if (input.promoted_to !== null && t.origin === "jorge" && !t.promotedTo) {
+    if (input.promoted_to !== null && t.origin === "owner" && !t.promotedTo) {
       const order = await readerOf(tx).get("events", { taskId: t.id, type: "pedido.construir" });
-      if (!order) throw new ToolError("PEDIDO_SIN_ORDEN", { hint: "Jorge has not said «Constrúyelo» on this request; it stays in its stop" });
+      if (!order) throw new ToolError("PEDIDO_SIN_ORDEN", { hint: "The owner has not said «Constrúyelo» on this request; it stays in its stop" });
     }
     patch.promotedTo = input.promoted_to === null ? null : await promotedTarget(tx, p.id, t, input.promoted_to);
   }
@@ -607,7 +663,7 @@ export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskI
     patch.stateNote = input.state_note;
     patch.stateNoteAt = input.state_note.trim() ? uowOf(tx).now : null;
   }
-  const warnings: WriteWarning[] = [];
+  const warnings: WriteWarning[] = [...oldSpellings];
   if (input.scope && STATUS_HEADING.test(input.scope)) warnings.push("scope has a status section: keep scope as the spec and put where things stand in state_note");
 
   for (const [field, name] of Object.entries(FIELD_NAMES) as [keyof Task, string][]) {
@@ -630,7 +686,7 @@ export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskI
   }
   if (input.withdraw_blocker) await withdrawParsedBlocker(tx, emit, u, input.withdraw_blocker, ctx);
   // A parsed line never moves the task (only blocked_note's lines hold a Blocked ticket, like any blocker).
-  const parsed = await syncJorgeLines(tx, emit, u, parsedTexts(u, input.status !== "Blocked" ? input.note : undefined));
+  const parsed = await syncOwnerLines(tx, emit, u, parsedTexts(u, input.status !== "Blocked" ? input.note : undefined));
   warnings.push(...parsed);
 
   const changedNames: string[] = [];
@@ -650,8 +706,8 @@ export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskI
       changedNames.push("claim");
       await emit("claim.released", u, { owner: t.owner, reason: "status" });
     }
-    // Closing with something still running on the Mac is allowed (agents own Done), but each item is named
-    // with its teardown so the closer, or Jorge on the screen, can clean up.
+    // Closing with something still running on the machine is allowed (agents own Done), but each item is named
+    // with its teardown so the closer, or the owner on the screen, can clean up.
     if (patch.status === "Done" || patch.status === "Won't do") {
       for (const f of await liveTaskFootprint(tx, t.id)) warnings.push({ code: "FOOTPRINT_LIVE", kind: f.kind, locator: f.locator, teardown: f.teardown });
     }
@@ -665,6 +721,11 @@ export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskI
     if (patch.status === "Done" && t.kind === "ticket") await tickDerived(tx, emit, u, ctx.actor);
     // A ticket reaching In review or later may be what a Blocked ticket waited for.
     await promoteUnblocked(tx, emit, p.id);
+    // PLA-I73-2: a step sent back from review may have steps stacked on it: they are told, so their next run
+    // rebases onto its new commits before delivering.
+    if (t.status === "In review" && patch.status === "Ready") {
+      for (const d of await stackedOn(tx, t.id)) await emit("note", d as never, { text: say(STACK_WORDS).sentBack(u.key) });
+    }
   }
   if (rekey) {
     changedNames.push("key");
@@ -676,7 +737,7 @@ export async function setTaskInTx(tx: Q, emit: Emit, p: Project, input: SetTaskI
   }
   if (input.status !== "Blocked" && input.note?.trim()) {
     changedNames.push("note");
-    await addNote(emit, u, input.note);
+    await addNote(emit, u, input.note, ctx.human ? screenNoteFields(input) : {});
   }
   // Blocked with blockers that already hold goes straight back to Ready.
   if (parsed.length || input.withdraw_blocker) changedNames.push("blocked_by");

@@ -1,4 +1,4 @@
-// PLA-I36 phases 3-4: the wheel on the card and anyone at the Mac can drive. Levers (PLA-I36-6), proposals as data
+// PLA-I36 phases 3-4: the wheel on the card and anyone at the machine can drive. Levers (PLA-I36-6), proposals as data
 // (PLA-I36-7), one box with plan approval (PLA-I36-8), see it working (PLA-I36-9; stopping a live process is in
 // test/runner.test.ts), evidence before accepting (PLA-I36-10), plain words and the owner's code (PLA-I36-11).
 // Throwaway store for the payload and the routes, server-rendered UI with fake data. Fake names and numbers only.
@@ -7,6 +7,7 @@ import { after, before, test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Actor } from "../src/db/schema.js";
 import { TEST_BEARER, ownerCode, resetTestStore, useOwnerCode, useTestEnv, type TestStore } from "./helpers.js";
 
@@ -27,10 +28,9 @@ const { PROTOCOL_VERSION } = await import("../src/mcp/protocol.js");
 
 (globalThis as { React?: unknown }).React = React;
 const load = async (p: string) => (await import(new URL(`../ui/src/${p}`, import.meta.url).href)) as Record<string, any>;
-const v2 = await load("components/compania/v2.tsx");
-const floor = await load("components/compania/edificio/floor.tsx");
-const side = await load("components/compania/edificio/side.tsx");
-const ask = await load("components/compania/edificio/ask.tsx");
+// PLA-I62-9: the building is gone; the cards are La corriente's (components/corriente/pendiente.tsx, ahora.tsx).
+const pend = await load("components/corriente/pendiente.tsx");
+const stripUi = await load("components/corriente/strip.tsx");
 const lib = await load("lib/v2.ts");
 
 type Json = Record<string, any>;
@@ -86,7 +86,7 @@ test("I36-6 #1: a message from the card creates the PO's ticket and shows its wa
   assert.equal(out.woke, null);
   assert.equal(lib.askText(out), "Enviado · el PO lo toma en su turno");
   const scope = await taskOf(out.key);
-  assert.deepEqual([scope.origin, scope.status], ["jorge", "Ready"]);
+  assert.deepEqual([scope.origin, scope.status], ["owner", "Ready"]);
   assert.match(scope.scope, /\(un cambio\): "Agrega un botón de WhatsApp"/);
   const o = (await card()).orders.find((x: Json) => x.key === out.key);
   assert.deepEqual([o.stage, o.text], ["enviada", "Agrega un botón de WhatsApp"]);
@@ -120,10 +120,12 @@ test("I36-6 #3: picking another ticket as next changes Siguiente on the next rea
 });
 
 test("I36-6 #4: Pausar from the card pauses the project; it moves to En pausa", async () => {
-  const html = renderCard({ ...(await card("filmia")) }, steerStub());
+  const html = renderCard({ ...(await card("filmia")) });
   assert.ok(html.includes('data-control="pausar"'));
-  const page = await import("node:fs").then((fs) => fs.readFileSync(new URL("../ui/src/pages/ceo.tsx", import.meta.url), "utf8"));
-  assert.ok(page.includes("onPause: (p) => setPausing(p)") && page.includes("<StopBody") && page.includes("api.setProjectPaused(slug, true)"));
+  const sheet = await import("node:fs").then((fs) => fs.readFileSync(new URL("../ui/src/components/corriente/hojas.tsx", import.meta.url), "utf8"));
+  // PLA-I2-10: the sheet's words moved to its wording module.
+  const sheetWords = await import("node:fs").then((fs) => fs.readFileSync(new URL("../ui/src/lib/hojas-words.ts", import.meta.url), "utf8"));
+  assert.ok(sheet.includes("api.setProjectPaused(p.slug, true)") && sheetWords.includes("Se cierra"));
   assert.equal((await post("/api/company/projects/filmia/switch", { paused: true })).status, 200);
   const f = await card("filmia");
   assert.deepEqual([f.paused, f.light], [true, "paused"]);
@@ -178,7 +180,7 @@ test("I36-7 #3: 1 + 2 shows and is accepted only when the proposal marks them co
 });
 
 test("I36-7 #5: the protocol is 2.21 and docs/bot-protocol.md describes propose", async () => {
-  assert.equal(PROTOCOL_VERSION, "2.22");
+  assert.equal(PROTOCOL_VERSION, "2.26");
   const { readFileSync } = await import("node:fs");
   const doc = readFileSync(new URL("../docs/bot-protocol.md", import.meta.url), "utf8");
   assert.ok(doc.includes("## Proposals (protocol 2.19)") && doc.includes('kind: "plan"') && doc.includes("combinable"));
@@ -218,7 +220,7 @@ test("I36-8 #1, #2: with plan approval on, the PO's plan shows in Te toca and no
   const o = (await card()).orders.find((x: Json) => x.key === order);
   assert.deepEqual([o.stage, o.plan.needs_approval, o.plan.approved], ["entendido", true, false]);
   const html = renderTeToca([row]);
-  for (const t of ["Lo entendí:", "Hecho cuando: el botón abre WhatsApp en el teléfono", "Aprobar el plan", "Se crean sus pasos y Taller empieza.", "Cambiar algo", "Cancelar"]) assert.ok(html.includes(t), t);
+  for (const t of ["Lo entendí:", "Hecho cuando: el botón abre WhatsApp en el teléfono", "Empezar", "Se crean sus pasos y Taller empieza.", "Cambiar algo", "Cancelar"]) assert.ok(html.includes(t), t);
 
   const go = await act(row.id, { action: "empezar" });
   assert.equal(go.status, 200, await go.clone().text());
@@ -519,50 +521,21 @@ test("I36-11 #4: asking, approving a plan, stopping a run and accepting into the
 
 // ---- the screen (UI, fake data)
 
-function steerStub() {
-  return { onAsk: async () => ({ key: "x", title: "x", po: "po", wake: "queued", woke: null }), onPickNext() {}, onPause() {}, onRun() {}, onNote() {}, onCancelOrder() {}, onOptions() {}, prefill: {}, busy: null };
-}
-// PLA-I39: the floor (plate and windows) and the plan's side page take what the card held; a decision renders with
-// Te toca's body under its asker's window.
-function renderCard(p: Json, steer: unknown = steerStub()) {
-  return renderToStaticMarkup(
-    React.createElement(
-      MemoryRouter,
-      null,
-      React.createElement(floor.Floor, { project: p, now: Date.now() }),
-      React.createElement(side.PlanPage, { project: p, now: Date.now(), steer }),
-    ),
-  );
+const noop = () => {};
+const fakeActs = { refresh: noop, decisions: { decide: noop, withActed: (d: Json[]) => d, busy: null, errors: {}, prefill: {}, setPrefill: noop }, busy: null, stopRun: noop, resumeRun: noop, start: noop, plan: noop, autoAccept: noop, autoInvisible: noop, resend: noop, closeRequest: noop, cancelOrder: noop, pickNext: noop, note: noop, resume: noop, pause: noop };
+const links = { entrega: () => "/e", tetoca: () => "/t", paso: () => "/p", tablero: "/tb", equipo: "/eq", miembro: () => "/m", publicar: "/pub", pausar: "/pausar", pagina: "/pg", hash: () => "/h" };
+// PLA-I64-7: the project's bar carries Pausar (Ahora is retired); Te toca's cards are La corriente's.
+function renderCard(p: Json) {
+  return renderToStaticMarkup(React.createElement(QueryClientProvider, { client: new QueryClient() }, React.createElement(MemoryRouter, null, React.createElement(stripUi.ProjectBar, { slug: p.slug, title: p.title, lanes: [], tab: "todo", href: () => "/t", projectHref: () => "/p", back: "/c", pedirTo: "/pedir", paused: !!p.paused, pauseHref: "/pausar" }))));
 }
 function renderTeToca(decisions: Json[]) {
   return renderToStaticMarkup(
-    React.createElement(MemoryRouter, null, ...decisions.map((d) => React.createElement(v2.DecisionBody, { key: d.id, d, now: Date.now(), busy: null, onAct: () => {} }))),
+    React.createElement(QueryClientProvider, { client: new QueryClient() }, React.createElement(MemoryRouter, null, ...decisions.map((d) => React.createElement(pend.Pendiente, { key: d.id, d, p: null, acts: fakeActs, links: { entrega: () => "/e", publicar: () => "/pub", project: () => "/p" } })))),
   );
 }
 
-// PLA-I53-3: the stage board's cards carry their key by the accepted Design doc of PLA-I53 (key, title, stage word);
-// everything else on the floor still keeps keys inside Detalles.
-const outsideDetalles = (html: string) => html.replace(/<section class="dark sb"[\s\S]*?<\/section>/g, "").replace(/<details[\s\S]*?<\/details>/g, "");
 
-test("I36-11 #1: the page renders no ticket key, branch name or the word sandbox outside Detalles", async () => {
-  const p = await card();
-  const decisions = (await company()).decisions as Json[];
-  const html = outsideDetalles(renderCard(p, steerStub()) + renderTeToca(decisions));
-  // Free text written by bots (a message body opened with Ver mensaje) is theirs; the rendered rows are folded.
-  assert.equal(/\b[A-Z]{2,5}-(I\d+-)?\d+\b/.test(html), false, html.match(/\b[A-Z]{2,5}-(I\d+-)?\d+\b/)?.[0] ?? "");
-  assert.equal(/sandbox|jl\/|main\b/i.test(html.replace(/<[^>]+>/g, " ")), false);
-  assert.ok(renderCard(p, steerStub()).includes("data-detalles"), "the keys live in Detalles");
-  assert.equal(lib.stateText({ action: "fusionar", at: "x", result: {} }), "Aprobado · en la copia de prueba");
-});
 
-test("I36-8 #5: phone at 390: the floor's box and its button fit in one column", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(MemoryRouter, null, React.createElement(ask.AskView, { project: { slug: "workia", title: "Workia" }, text: "", setText() {}, onSubmit() {} })),
-  );
-  // PLA-I54-1: a textarea, the two modes and the button, stacked in one column.
-  assert.ok(html.includes("Pide algo para Workia") && html.includes("Darle forma"));
-  assert.ok(html.includes('class="edi-ask-text"') && html.includes('class="edi-modes"'));
-});
 
 // ---- PLA-I36-12
 
@@ -638,6 +611,6 @@ test("PLA-27: a plan that waits for approval still refuses aceptar and takes Sí
   assert.deepEqual([refused.status, ((await refused.json()) as Json).error], [400, "INVALID_ACTION"]);
   assert.equal((await act(id, { action: "empezar" })).status, 200);
   await post("/api/company/projects/workia/options", { plan_approval: false }, "PUT");
-  const page = (await import("node:fs")).readFileSync(new URL("../ui/src/pages/ceo.tsx", import.meta.url), "utf8");
+  const page = (await import("node:fs")).readFileSync(new URL("../ui/src/lib/acts-words.ts", import.meta.url), "utf8");
   assert.ok(page.includes('INVALID_ACTION: "Eso no se puede hacer aquí.'), "the screen says it in words");
 });

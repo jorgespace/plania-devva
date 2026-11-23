@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -6,10 +7,12 @@ import type { Db } from "../db/client.js";
 import type { Finding } from "../mcp/audit.js";
 import type { Q } from "../mcp/tx.js";
 import { writeVia } from "../runner/limits.js";
-import { DevvaStore } from "../store/devva.js";
+import { DevvaStore, type DevvaOptions } from "../store/devva.js";
 import { storeOfHandle } from "../store/handles.js";
 import { readerOf } from "../store/port.js";
 import type { Job } from "./index.js";
+import { pgToolFor } from "../lib/pg-bin.js";
+import { screenTz } from "../locale.js";
 
 // The nightly backup: once per local day after 03:00 (PLANIA_TZ), the store's commit log as gzipped text in
 // ~/plania-backups/plania-<YYYYMMDD>.devva.jsonl.gz. A dump only counts after it has been loaded into a
@@ -51,6 +54,16 @@ export type BackupDeps = {
 
 export function backupDir(): string {
   return process.env.PLANIA_BACKUP_DIR || path.join(homedir(), "plania-backups");
+}
+
+// PLA-I2-12: the pg_dump the machine check looks for. Plania's own backup is the store's log, not pg_dump; the
+// projects' test copies of their own Postgres databases use it (src/captures/prueba.ts).
+// PLA-I2-4: the lookup is shared with psql and the test copies (src/lib/pg-bin.ts): PLANIA_PG_BIN, the server's
+// major on macOS and Linux, PATH, then the usual folders.
+export function pgDumpFor(major: number, env: NodeJS.ProcessEnv = process.env, exists: (p: string) => boolean = existsSync, listDir?: (dir: string) => string[]): string {
+  const bin = env.PLANIA_PG_BIN?.trim();
+  if (bin && /pg_dump(.exe)?$/i.test(path.basename(bin))) return bin;
+  return pgToolFor("pg_dump", major, { env, exists, listDir });
 }
 
 // Local date and hour in the screen's time zone.
@@ -100,9 +113,28 @@ async function dumpChecked(live: DevvaStore, file: string): Promise<void> {
   await writeFile(file, gzipSync(text));
 }
 
+// PLA-I2-8: the update's backup (src/update/), taken by the update command while the server may still be running.
+// The command opens a store of its own on the live lobes, read fresh from the engine, and makes the same checked dump
+// as the nightly job. A write the server commits between that read and the dump makes the drill differ; the store is
+// then read again and the dump tried again.
+export async function dumpStore(opts: DevvaOptions, file: string, tries = 3): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    const live = await DevvaStore.open(opts);
+    try {
+      await dumpChecked(live, file);
+      return;
+    } catch (e) {
+      await rm(file, { force: true });
+      if (attempt >= tries || !/^restore drill: /.test(e instanceof Error ? e.message : "")) throw e;
+    } finally {
+      live.close();
+    }
+  }
+}
+
 // One tick: dumps when today's dump is still missing and it is past 03:00 local time.
 export async function runBackup(db: Db, now: Date, deps: BackupDeps = {}): Promise<{ dumped: number; pruned: number; failed: number }> {
-  const tz = deps.tz ?? (process.env.PLANIA_TZ || "America/Mexico_City");
+  const tz = deps.tz ?? screenTz();
   const { day, hour } = localParts(now, tz);
   const state = await backupState(db);
   if (hour < AFTER_HOUR || state.day === day) return { dumped: 0, pruned: 0, failed: 0 };

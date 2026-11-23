@@ -1,0 +1,234 @@
+// PLA-I66-1: each project's logo, found in its repo and kept in Plania as the original. The detector reads the
+// project's start branch with git (never the working tree, never a write), ranks the files (src/brand/detect.ts) and
+// stores the winner once per content under <captures dir>/_marca/<project>/. A project's logo changes only when the
+// branch moves and its best file changes; a logo the owner uploaded or chose from Artist's marks is never replaced by
+// the repo (a later step asks instead). Reads are throttled per project, so the screen can ask on every load.
+import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import type { Db } from "../db/client.js";
+import type { Actor, Project, ProjectLogo, Task } from "../db/schema.js";
+import { writeVia } from "../runner/limits.js";
+import { readerOf } from "../store/port.js";
+import type { NewRow } from "../store/types.js";
+import { capturesDir } from "../captures/store.js";
+import { repoPathOf } from "../runner/worktree.js";
+import { startBranchOf } from "../runner/start-branch.js";
+import { bus } from "../events.js";
+import { detectLogo, looksLikeLogo, MAX_LOGO_BYTES, type RepoFile } from "./detect.js";
+
+export type Git = (cwd: string, args: string[]) => Promise<{ code: number; stdout: Buffer }>;
+export type LogoDeps = { git?: Git; now?: () => number; env?: NodeJS.ProcessEnv; fresh?: boolean };
+
+export const DETECTOR: Actor = { agent: "plania", session_id: "marca-detector" };
+// How often one project's repo is looked at, at most. The look itself is one rev-parse unless the branch moved.
+export const RECHECK_MS = 60_000;
+const EXT: Record<ProjectLogo["mime"], string> = { "image/svg+xml": "svg", "image/png": "png" };
+const FILE = /^[0-9a-f]{64}\.(svg|png)$/;
+
+export const realGit: Git = (cwd, args) =>
+  new Promise((resolve) => {
+    execFile("git", args, { cwd, encoding: "buffer", maxBuffer: 16 * 1024 * 1024, timeout: 20_000 }, (err, stdout) =>
+      resolve({ code: err ? 1 : 0, stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? "") }),
+    );
+  });
+
+function logoDir(slug: string): string {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new Error(`bad project slug ${slug}`);
+  return path.join(capturesDir(), "_marca", slug);
+}
+
+/** Writes the file once (content-addressed) and returns its name. */
+export function putLogoFile(slug: string, bytes: Buffer, mime: ProjectLogo["mime"]): string {
+  const name = `${createHash("sha256").update(bytes).digest("hex")}.${EXT[mime]}`;
+  const dir = logoDir(slug);
+  mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, name);
+  if (!existsSync(target)) {
+    const tmp = path.join(dir, `.${name}.${randomUUID()}.tmp`);
+    writeFileSync(tmp, bytes);
+    renameSync(tmp, target);
+  }
+  return name;
+}
+
+export function readLogoFile(slug: string, file: string): Buffer | null {
+  if (!FILE.test(file)) return null;
+  const p = path.join(logoDir(slug), file);
+  return existsSync(p) ? readFileSync(p) : null;
+}
+
+/** The commit the logo is read from: the start branch as GitHub has it, the local one, or HEAD when the repo has neither.
+ * PLA-120: origin first, so a checkout nobody pulled still shows what was merged. */
+export async function startCommit(git: Git, repo: string, branch: string): Promise<{ sha: string; ref: string } | null> {
+  for (const ref of [`origin/${branch}`, branch, "HEAD"]) {
+    const r = await git(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    const sha = r.stdout.toString("utf8").trim();
+    if (r.code === 0 && /^[0-9a-f]{40}$/.test(sha)) return { sha, ref };
+  }
+  return null;
+}
+
+// PLA-125: the start branch as GitHub has it. Only that branch's remote-tracking ref moves (never the working tree), at
+// most once a minute per repo, or right away when the owner asks («Revisar el repo ahora»). A repo with no origin, or
+// no network, just fails the fetch and is read as it is.
+const lastFetch = new Map<string, number>();
+export async function fetchStart(git: Git, repo: string, branch: string, now: number, force = false): Promise<void> {
+  const at = lastFetch.get(repo);
+  if (!force && at !== undefined && now - at < RECHECK_MS) return;
+  lastFetch.set(repo, now);
+  await git(repo, ["fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+}
+
+/** Every file at a commit with its size (PLA-I66-2: the checklist looks at paths before reading any). */
+export async function listTree(git: Git, repo: string, commit: string): Promise<Map<string, number>> {
+  const ls = await git(repo, ["ls-tree", "-r", "-l", "-z", commit]);
+  const out = new Map<string, number>();
+  if (ls.code !== 0) return out;
+  for (const entry of ls.stdout.toString("utf8").split("\0")) {
+    const m = entry.match(/^\d+ blob [0-9a-f]+\s+(\d+)\t(.+)$/);
+    if (m) out.set(m[2]!, Number(m[1]));
+  }
+  return out;
+}
+
+export async function readBlob(git: Git, repo: string, commit: string, file: string): Promise<Buffer | null> {
+  const blob = await git(repo, ["cat-file", "blob", `${commit}:${file}`]);
+  return blob.code === 0 ? blob.stdout : null;
+}
+
+/** The logo-looking files at a commit, with their bytes (only the few that pass the name rules are read). */
+export async function filesAt(git: Git, repo: string, commit: string, slug: string, tree?: Map<string, number>): Promise<RepoFile[]> {
+  const out: RepoFile[] = [];
+  for (const [p, size] of tree ?? (await listTree(git, repo, commit))) {
+    if (size > MAX_LOGO_BYTES || !looksLikeLogo(p, slug)) continue;
+    const bytes = await readBlob(git, repo, commit, p);
+    if (bytes) out.push({ path: p, bytes });
+    if (out.length >= 40) break;
+  }
+  return out;
+}
+
+export async function activeLogo(db: Db, projectId: string): Promise<ProjectLogo | null> {
+  return (await readerOf(db).get("projectLogos", { projectId, active: true })) ?? null;
+}
+
+/** The project's tickets whose scope carries a Marca marker (case-insensitive, as an ilike '%marker%'), newest first. */
+export async function tasksMarked(db: Db, projectId: string, marker: string): Promise<Task[]> {
+  const m = marker.toLowerCase();
+  const rows = await readerOf(db).find("tasks", { projectId }, { orderBy: [{ column: "createdAt", desc: true }] });
+  return rows.filter((t) => !!t.scope && t.scope.toLowerCase().includes(m));
+}
+
+/** A new active version; the previous one stays as history. */
+export async function addLogoVersion(
+  db: Db,
+  project: Pick<Project, "id" | "slug">,
+  v: Omit<NewRow<"projectLogos">, "id" | "projectId" | "version" | "active" | "createdAt">,
+): Promise<ProjectLogo> {
+  // One active logo per project (a partial unique index in Postgres, kept here: the old one goes inactive first).
+  const row = await writeVia(
+    db,
+    async (uow) => {
+      const top = Math.max(0, ...(await uow.find("projectLogos", { projectId: project.id })).map((l) => l.version));
+      await uow.update("projectLogos", { projectId: project.id, active: true }, { active: false });
+      return uow.insert("projectLogos", { ...v, projectId: project.id, version: top + 1, active: true });
+    },
+    project.id,
+  );
+  bus.publish({ type: "project", project: project.slug });
+  return row;
+}
+
+export type ScanResult = { status: "found" | "same" | "none" | "kept" | "no_repo"; logo: ProjectLogo | null; commit: string | null };
+
+/** Looks at one project's repo once and records a new logo version when its best file changed. */
+export async function scanProjectLogo(db: Db, project: Project, deps: LogoDeps = {}): Promise<ScanResult> {
+  const git = deps.git ?? realGit;
+  const current = await activeLogo(db, project.id);
+  if (project.settings?.local?.no_code) return { status: "no_repo", logo: current, commit: null };
+  const repo = repoPathOf(project.slug, project.settings, deps.env);
+  await fetchStart(git, repo, startBranchOf(project.settings), (deps.now ?? Date.now)(), !!deps.fresh);
+  const commit = (await startCommit(git, repo, startBranchOf(project.settings)))?.sha ?? null;
+  if (!commit) return { status: "no_repo", logo: current, commit: null };
+  // PLA-I66-3: a logo the owner chose (an upload, a candidate, an Artist mark, a version gone back to) stays.
+  if (current?.chosen) return { status: "kept", logo: current, commit };
+  if (current?.sourceCommit === commit) return { status: "same", logo: current, commit };
+  const { best } = detectLogo(await filesAt(git, repo, commit, project.slug), project.slug);
+  if (!best) return { status: "none", logo: current, commit };
+  const file = putLogoFile(project.slug, best.bytes, best.mime);
+  if (current && current.file === file && current.sourcePath === best.path) {
+    // Same logo on a newer commit: remember the commit, no new version.
+    await writeVia(db, (uow) => uow.update("projectLogos", { id: current.id }, { sourceCommit: commit }), project.id);
+    return { status: "same", logo: { ...current, sourceCommit: commit }, commit };
+  }
+  const logo = await addLogoVersion(db, project, {
+    file,
+    mime: best.mime,
+    bytes: best.bytes.length,
+    width: best.width === null ? null : Math.round(best.width),
+    height: best.height === null ? null : Math.round(best.height),
+    variant: best.variant,
+    source: "repo",
+    sourcePath: best.path,
+    sourceCommit: commit,
+    colors: best.colors,
+    actor: DETECTOR,
+  });
+  return { status: "found", logo, commit };
+}
+
+// When each project was last looked at, in this process. A restart looks once more, which is cheap.
+const lastLook = new Map<string, number>();
+let running: Promise<void> | null = null;
+
+/** Looks at every project whose last look is older than RECHECK_MS. One pass at a time; errors leave the old logo. */
+export async function refreshLogos(db: Db, deps: LogoDeps = {}): Promise<void> {
+  if (running) return running;
+  const now = deps.now ?? Date.now;
+  running = (async () => {
+    const all = await readerOf(db).find("projects");
+    for (const p of all) {
+      if (now() - (lastLook.get(p.id) ?? -Infinity) < RECHECK_MS) continue;
+      lastLook.set(p.id, now());
+      try {
+        await scanProjectLogo(db, p, deps);
+      } catch (e) {
+        console.error(`[marca] ${p.slug}: ${(e as Error).message}`);
+      }
+    }
+  })().finally(() => {
+    running = null;
+  });
+  return running;
+}
+export const forgetLogoLooks = (): void => {
+  lastLook.clear();
+  lastFetch.clear();
+};
+
+export type LogoRef = { v: number; file: string; mime: ProjectLogo["mime"]; variant: ProjectLogo["variant"]; colors: string[]; source: ProjectLogo["source"]; path: string | null };
+
+/** Every project's active logo, by slug: what the screen needs to draw ProjectMark. */
+export async function logosRead(db: Db): Promise<Record<string, LogoRef>> {
+  const r = readerOf(db);
+  const slugOf = new Map((await r.find("projects")).map((p) => [p.id, p.slug]));
+  const rows = await r.find("projectLogos", { active: true }, { orderBy: [{ column: "version", desc: true }] });
+  const out: Record<string, LogoRef> = {};
+  for (const l of rows) {
+    const slug = slugOf.get(l.projectId);
+    if (slug) out[slug] = { v: l.version, file: l.file, mime: l.mime, variant: l.variant, colors: l.colors, source: l.source, path: l.sourcePath };
+  }
+  return out;
+}
+
+/** The active logo's bytes for a project, or null. */
+export async function logoBytes(db: Db, slug: string): Promise<{ bytes: Buffer; mime: ProjectLogo["mime"] } | null> {
+  const p = await readerOf(db).get("projects", { slug });
+  if (!p) return null;
+  const l = await activeLogo(db, p.id);
+  if (!l) return null;
+  const bytes = readLogoFile(slug, l.file);
+  return bytes ? { bytes, mime: l.mime } : null;
+}

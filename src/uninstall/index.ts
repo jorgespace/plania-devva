@@ -1,0 +1,333 @@
+// PLA-I2-18: leaving Plania. `pnpm uninstall:plania` (scripts/uninstall.ts) stops and removes the service, stops what
+// is left of Plania's processes (the server and its runs' wrappers), and keeps the data and every folder. With
+// --delete-data, and only after the owner types the store's name, it also empties the store's lobes in the devva
+// engine and removes Plania's own folders. There is no database to drop: the engine cannot drop a lobe, so the empty
+// lobes stay in it, and the engine itself (deploy/devva/, a Docker container and its volume) is never stopped or
+// removed here; the last lines say so and how. The backups folder is never removed: it is the copy the owner leaves
+// with.
+//
+// Every outside call is injected (programs, the filesystem, the prompt, emptying the store, the process list), so a
+// test sees exactly what would run. The service removal is its own function: PLA-I2-17 sets the service up and can
+// pass its own; the default looks for the launchd agent and the systemd user unit by the names the README uses.
+// PLA-I2-19 (audit B5): on native Windows, the Scheduled Task «Plania» and its supervisor, the processes found by
+// command line (CIM), stopped with taskkill /T, and %LOCALAPPDATA%\plania as Plania's log folder.
+import { existsSync, rmSync } from "node:fs";
+import { readlink } from "node:fs/promises";
+import { homedir, platform } from "node:os";
+import path from "node:path";
+import { killTree } from "../lib/proc-tree.js";
+import { supervisorArgs, WINDOWS_TASK, windowsPaths } from "../packaging/service.js";
+
+// The macOS and Linux paths below are POSIX on every machine, tests included; Windows' own use path.win32.
+const join = path.posix.join;
+import { defaultExec, type ExecFn } from "../brief/doctor.js";
+import { devvaAddress } from "../install/connect.js";
+import { loadClient } from "../store/devva.js";
+import { defineWords, say } from "../words.js";
+
+// PLA-I2-10: what the uninstall command says, in the install's language.
+export const UNINSTALL_WORDS = defineWords({
+  es: {
+    serviceRemoved: (name: string) => `Servicio ${name} detenido y quitado.`,
+    noService: "No había servicio de Plania instalado.",
+    processesLeft: (pids: number[]) => `Quedan procesos de Plania que no se detuvieron: ${pids.join(", ")}.`,
+    processesStopped: (n: number) => `Procesos de Plania detenidos: ${n}.`,
+    confirm: (name: string) => `Para borrar los datos y las carpetas de Plania, escribe el nombre del almacén (${name}): `,
+    notConfirmed: "No escribiste el nombre del almacén: no se borró nada.",
+    emptied: (name: string) => `Almacén ${name} vaciado en el motor devva.`,
+    folderRemoved: (dir: string) => `Carpeta borrada: ${dir}`,
+    kept: (name: string) => `Tus datos (el almacén ${name} en el motor devva) y tus carpetas siguen ahí. Para borrarlos: pnpm uninstall:plania --delete-data`,
+    // There is no database to drop: what stays in the engine, said plainly.
+    engineStays: (name: string) =>
+      `El motor devva sigue encendido y guarda los espacios vacíos de ${name} (${name}_log, ${name}_ent): el motor no puede borrarlos. Para quitar el motor y todo lo que guarda: docker compose -f deploy/devva/compose.yml down -v`,
+    engineKept: "El motor devva sigue encendido; Plania no lo apaga ni lo borra (deploy/devva/README.md).",
+    backups: (dir: string) => `Tus copias de seguridad se quedan en ${dir}.`,
+    finish: (root: string) => `Para terminar, borra la carpeta de Plania: ${root}`,
+  },
+  en: {
+    serviceRemoved: (name: string) => `Service ${name} stopped and removed.`,
+    noService: "No Plania service was installed.",
+    processesLeft: (pids: number[]) => `Some Plania processes did not stop: ${pids.join(", ")}.`,
+    processesStopped: (n: number) => `Plania processes stopped: ${n}.`,
+    confirm: (name: string) => `To delete Plania's data and folders, type the store's name (${name}): `,
+    notConfirmed: "You did not type the store's name: nothing was deleted.",
+    emptied: (name: string) => `Store ${name} emptied on the devva engine.`,
+    folderRemoved: (dir: string) => `Folder deleted: ${dir}`,
+    kept: (name: string) => `Your data (the store ${name} on the devva engine) and your folders are still there. To delete them: pnpm uninstall:plania --delete-data`,
+    engineStays: (name: string) =>
+      `The devva engine is still running and keeps the empty lobes of ${name} (${name}_log, ${name}_ent): the engine cannot drop them. To remove the engine and everything it holds: docker compose -f deploy/devva/compose.yml down -v`,
+    engineKept: "The devva engine is still running; Plania does not stop or remove it (deploy/devva/README.md).",
+    backups: (dir: string) => `Your backups stay in ${dir}.`,
+    finish: (root: string) => `To finish, delete the Plania folder: ${root}`,
+  },
+});
+
+export const LAUNCHD_LABEL = "com.plania.server";
+export const SYSTEMD_UNIT = "plania.service";
+
+export type UninstallContext = {
+  os: string;
+  home: string;
+  uid: number | null;
+  root: string;
+  env: NodeJS.ProcessEnv;
+  exec: ExecFn;
+  exists: (p: string) => boolean;
+  remove: (p: string) => void;
+};
+
+export type UninstallDeps = {
+  os?: string;
+  home?: string;
+  uid?: number | null;
+  /** Plania's folder. */
+  root?: string;
+  env?: NodeJS.ProcessEnv;
+  exec?: ExecFn;
+  exists?: (p: string) => boolean;
+  remove?: (p: string) => void;
+  /** Asks one question in the terminal and returns the answer. */
+  prompt?: (question: string) => Promise<string>;
+  /** Stops and removes the service; returns one line per thing done. */
+  removeService?: (ctx: UninstallContext) => Promise<string[]>;
+  /** Plania's processes still running on this machine. */
+  findProcesses?: (ctx: UninstallContext) => Promise<number[]>;
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Empties the store's lobes on the engine env names (the engine cannot drop a lobe). */
+  emptyStore?: (prefix: string, env: NodeJS.ProcessEnv) => Promise<void>;
+  log?: (line: string) => void;
+  /** Waits between asking processes to stop and checking they did. */
+  wait?: (ms: number) => Promise<void>;
+};
+
+export type UninstallResult = {
+  service: string[];
+  stopped: number[];
+  left: number[];
+  store: "kept" | "emptied" | "not_confirmed";
+  removed: string[];
+  kept: string[];
+};
+
+export const launchdPlist = (home: string) => join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+export const systemdUnit = (home: string) => join(home, ".config", "systemd", "user", SYSTEMD_UNIT);
+
+/** The launchd agent on macOS, the systemd user unit on Linux; each only when its file is there. */
+export async function defaultRemoveService(ctx: UninstallContext): Promise<string[]> {
+  const done: string[] = [];
+  const run = async (cmd: string, args: string[], cwd = ctx.home) => {
+    try {
+      await ctx.exec(cmd, args, { env: ctx.env, cwd, timeoutMs: 30_000 });
+    } catch {
+      // A service that is not loaded makes these fail; the file is removed all the same.
+    }
+  };
+  if (ctx.os === "win32") {
+    const p = windowsPaths({ home: ctx.home, localAppData: ctx.env.LOCALAPPDATA });
+    if (ctx.exists(p.task) || ctx.exists(p.config)) {
+      // The supervisor lets the server drain and leaves; then the task goes.
+      await run(process.execPath, supervisorArgs({ root: ctx.root }, "stop"), ctx.root);
+      await run("schtasks", ["/Delete", "/TN", WINDOWS_TASK, "/F"]);
+      for (const f of [p.task, p.config, p.stopped]) if (ctx.exists(f)) ctx.remove(f);
+      done.push(say(UNINSTALL_WORDS).serviceRemoved(WINDOWS_TASK));
+    }
+  } else if (ctx.os === "darwin") {
+    const plist = launchdPlist(ctx.home);
+    if (ctx.exists(plist)) {
+      await run("launchctl", ["bootout", `gui/${ctx.uid ?? ""}/${LAUNCHD_LABEL}`]);
+      ctx.remove(plist);
+      done.push(say(UNINSTALL_WORDS).serviceRemoved(LAUNCHD_LABEL));
+    }
+  } else {
+    const unit = systemdUnit(ctx.home);
+    if (ctx.exists(unit)) {
+      await run("systemctl", ["--user", "disable", "--now", SYSTEMD_UNIT]);
+      ctx.remove(unit);
+      await run("systemctl", ["--user", "daemon-reload"]);
+      done.push(say(UNINSTALL_WORDS).serviceRemoved(SYSTEMD_UNIT));
+    }
+  }
+  return done;
+}
+
+const pidsOf = (text: string) =>
+  text
+    .split(/\s+/)
+    .map((x) => Number(x))
+    .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid);
+
+/**
+ * The server started from this folder (`scripts/dev.ts` whose working folder is Plania's) and the runs' wrappers (their
+ * command line names this folder's wrapper.mjs by its full path). Another checkout's processes are left alone.
+ */
+export async function defaultFindProcesses(ctx: UninstallContext): Promise<number[]> {
+  if (ctx.os === "win32") return windowsProcesses(ctx);
+  const pgrep = async (pattern: string) => {
+    try {
+      const r = await ctx.exec("pgrep", ["-f", pattern], { env: ctx.env, cwd: ctx.root, timeoutMs: 10_000 });
+      return r.code === 0 ? pidsOf(r.stdout) : [];
+    } catch {
+      return [];
+    }
+  };
+  const cwdOf = async (pid: number): Promise<string | null> => {
+    try {
+      if (ctx.os === "linux") return await readlink(`/proc/${pid}/cwd`);
+      const r = await ctx.exec("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { env: ctx.env, cwd: ctx.root, timeoutMs: 10_000 });
+      return /^n(.+)$/m.exec(r.stdout)?.[1] ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const out = new Set<number>();
+  for (const pid of await pgrep("scripts/dev\\.ts")) if (path.resolve((await cwdOf(pid)) ?? "\0") === path.resolve(ctx.root)) out.add(pid);
+  for (const pid of await pgrep(escape(join(ctx.root, "src", "runner", "wrapper.mjs")))) out.add(pid);
+  return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * Windows: Node processes whose command line names this folder and the server (scripts\dev.ts, which tsx's loader
+ * also names by this folder), the service's supervisor or a run's wrapper. There is no cwd to read there.
+ */
+async function windowsProcesses(ctx: UninstallContext): Promise<number[]> {
+  const script = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object { "$($_.ProcessId)\`t$($_.CommandLine)" }`;
+  let stdout = "";
+  try {
+    const r = await ctx.exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { env: ctx.env, cwd: ctx.root, timeoutMs: 20_000 });
+    if (r.code !== 0) return [];
+    stdout = r.stdout;
+  } catch {
+    return [];
+  }
+  const norm = (s: string) => s.replace(/\\/g, "/").toLowerCase();
+  const root = norm(path.win32.resolve(ctx.root)).replace(/\/+$/, "");
+  const out = new Set<number>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const tab = line.indexOf("\t");
+    if (tab < 0) continue;
+    const pid = Number(line.slice(0, tab));
+    const cmd = norm(line.slice(tab + 1));
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    if (cmd.includes(root) && /scripts\/(dev|service-win)\.ts|src\/runner\/wrapper\.mjs/.test(cmd)) out.add(pid);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** The store's name: its lobe prefix, PLANIA_DEVVA_PREFIX, else plania (src/store/open.ts). */
+export const storeName = (env: NodeJS.ProcessEnv): string => env.PLANIA_DEVVA_PREFIX?.trim() || "plania";
+
+/**
+ * Empties every lobe of the store (<prefix>_log, <prefix>_ent, and the search index <prefix>_vec when there is one).
+ * The engine cannot drop a lobe: the lobes stay, empty. Run after the server is stopped, so nothing writes meanwhile.
+ */
+export async function defaultEmptyStore(prefix: string, env: NodeJS.ProcessEnv): Promise<void> {
+  const a = devvaAddress(env);
+  const db = await (await loadClient({ prefix, host: a.host, port: a.port, tokenFile: a.tokenFile, clientModule: a.client, timeoutMs: 120_000 }))();
+  try {
+    const have = new Set((await db.listLobes()).map((l) => l.name));
+    for (const lobe of [`${prefix}_log`, `${prefix}_ent`, `${prefix}_vec`]) if (have.has(lobe)) await db.execute(`PURGE "${lobe}"`);
+  } finally {
+    db.close();
+  }
+}
+
+/** Plania's own folders, outside its install folder. Never the backups. */
+export function dataFolders(home: string, os: string, env: NodeJS.ProcessEnv): { remove: string[]; keep: string[] } {
+  if (os === "win32") {
+    const w = path.win32.join;
+    return {
+      remove: [w(home, ".config", "plania"), env.PLANIA_CAPTURES_DIR?.trim() || w(home, "plania-captures"), path.win32.dirname(windowsPaths({ home, localAppData: env.LOCALAPPDATA }).logDir)],
+      keep: [env.PLANIA_BACKUP_DIR?.trim() || w(home, "plania-backups")],
+    };
+  }
+  const remove = [
+    join(home, ".config", "plania"),
+    env.PLANIA_CAPTURES_DIR?.trim() || join(home, "plania-captures"),
+    os === "darwin" ? join(home, "Library", "Logs", "plania") : join(home, ".local", "state", "plania"),
+  ];
+  const keep = [env.PLANIA_BACKUP_DIR?.trim() || join(home, "plania-backups")];
+  return { remove, keep };
+}
+
+export async function uninstall(opts: { deleteData: boolean }, deps: UninstallDeps = {}): Promise<UninstallResult> {
+  const env = deps.env ?? process.env;
+  const ctx: UninstallContext = {
+    os: deps.os ?? platform(),
+    home: deps.home ?? env.HOME ?? homedir(),
+    uid: deps.uid !== undefined ? deps.uid : (process.getuid?.() ?? null),
+    root: deps.root ?? process.cwd(),
+    env,
+    exec: deps.exec ?? defaultExec,
+    exists: deps.exists ?? existsSync,
+    remove: deps.remove ?? ((p) => rmSync(p, { recursive: true, force: true })),
+  };
+  const log = deps.log ?? ((line: string) => console.log(line));
+  const w = say(UNINSTALL_WORDS);
+  // Windows: the tree (taskkill /T /F), since a server or wrapper ended alone leaves its children running.
+  const kill = deps.kill ?? ((pid, signal) => (ctx.os === "win32" ? killTree(pid, signal) : process.kill(pid, signal)));
+  const wait = deps.wait ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
+
+  // 1. The service, so nothing starts the server again.
+  const service = await (deps.removeService ?? defaultRemoveService)(ctx);
+  for (const line of service) log(line);
+  if (!service.length) log(w.noService);
+
+  // 2. What is still running: asked to stop, then made to.
+  const find = deps.findProcesses ?? defaultFindProcesses;
+  const stopped = await find(ctx);
+  for (const pid of stopped) {
+    try {
+      kill(pid, "SIGTERM");
+    } catch {
+      // already gone
+    }
+  }
+  let left: number[] = [];
+  if (stopped.length) {
+    await wait(3_000);
+    left = await find(ctx);
+    for (const pid of left) {
+      try {
+        kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    if (left.length) {
+      await wait(1_000);
+      left = await find(ctx);
+    }
+    log(left.length ? w.processesLeft(left) : w.processesStopped(stopped.length));
+  }
+
+  // 3. The data: kept unless asked twice (the flag, then the store's name typed back). The store is emptied before
+  // the folders go, since the engine's token file may live in ~/.config/plania.
+  const folders = dataFolders(ctx.home, ctx.os, env);
+  const name = storeName(env);
+  let store: UninstallResult["store"] = "kept";
+  const removed: string[] = [];
+  if (opts.deleteData) {
+    const answer = deps.prompt ? (await deps.prompt(w.confirm(name))).trim() : "";
+    if (answer !== name) {
+      store = "not_confirmed";
+      log(w.notConfirmed);
+    } else {
+      await (deps.emptyStore ?? defaultEmptyStore)(name, env);
+      store = "emptied";
+      log(w.emptied(name));
+      for (const dir of folders.remove)
+        if (ctx.exists(dir)) {
+          ctx.remove(dir);
+          removed.push(dir);
+          log(w.folderRemoved(dir));
+        }
+    }
+  }
+  if (store !== "emptied") log(w.kept(name));
+  // What stays in the engine: it is never stopped here, and it cannot drop the store's lobes.
+  log(store === "emptied" ? w.engineStays(name) : w.engineKept);
+  for (const dir of folders.keep) if (ctx.exists(dir)) log(w.backups(dir));
+  log(w.finish(ctx.root));
+  return { service, stopped, left, store, removed, kept: folders.keep };
+}

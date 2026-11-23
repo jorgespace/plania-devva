@@ -1,5 +1,5 @@
 // Mi progreso (PLA-I19). Read-only totals for the screen: what reached a final Done or Merged,
-// bucketed by calendar day in PLANIA_TZ (America/Mexico_City). A reopen clears resolved_at, so a
+// bucketed by calendar day in the screen zone (src/locale.ts). A reopen clears resolved_at, so a
 // ticket that was Done, reopened and Done again counts once, on the day it is Done now.
 // Titles containing [PRUEBA] and Won't do never count. Ideas stay in the bitácora only.
 // The year path reads the closes and merges of the span once, groups them per day in TypeScript and
@@ -9,16 +9,14 @@ import type { Task } from "../db/schema.js";
 import { readerOf } from "../store/port.js";
 import { gte, notNull, type Reader, type Row } from "../store/types.js";
 import { ToolError } from "./errors.js";
+import { screenTz } from "../locale.js";
+import { defineWords, say } from "../words.js";
 
 export type Range = "day" | "week" | "year";
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const PRUEBA = "[PRUEBA]";
 const WONT = "Won't do";
-const PROJECT_ORDER = ["micasa", "workia", "filmia", "zigzag", "plania"];
-const WEEK_SHORT = ["L", "M", "M", "J", "V", "S", "D"] as const;
-const WEEK_LONG = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"] as const;
-const MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"] as const;
 const CACHE_MS = 60_000;
 const HEATMAP_WEEKS = 53;
 const LOG_PAGE_DAYS = 21;
@@ -28,35 +26,92 @@ const EXCERPT = 280;
 export const PROGRESS_TYPES = ["bug", "code", "ops", "research", "decision-needed", "debt", "idea", "initiative", "pr"] as const;
 export type ProgressType = (typeof PROGRESS_TYPES)[number];
 
-const TYPE_LABEL: Record<string, string> = {
-  bug: "Bug arreglado",
-  code: "Feature",
-  ops: "Ops",
-  research: "Investigación",
-  "decision-needed": "Decisión",
-  debt: "Deuda",
-  idea: "Idea",
-  initiative: "Iniciativa cerrada",
-  pr: "PR fusionado",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  Done: "Cerrada",
-  "Won't do": "Descartada",
-  "In progress": "En curso",
-  "In review": "En revisión",
-  Merged: "Fusionada",
-  Released: "Publicada",
-  Ready: "Lista",
-  Backlog: "En espera",
-  Blocked: "Bloqueada",
-  "Needs Jorge": "Te toca",
-  Planning: "Planeando",
-  Active: "Activa",
-  Shipping: "En estreno",
-  "On hold": "En pausa",
-  Open: "Abierta",
-};
+// PLA-I2-10: the labels, weekdays and months in the install's language; the Spanish is unchanged.
+export const PROGRESS_WORDS = defineWords({
+  es: {
+    weekShort: ["L", "M", "M", "J", "V", "S", "D"] as readonly string[],
+    weekLong: ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"] as readonly string[],
+    months: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"] as readonly string[],
+    types: {
+      bug: "Bug arreglado",
+      code: "Feature",
+      ops: "Ops",
+      research: "Investigación",
+      "decision-needed": "Decisión",
+      debt: "Deuda",
+      idea: "Idea",
+      initiative: "Iniciativa cerrada",
+      pr: "PR fusionado",
+    } as Record<string, string>,
+    status: {
+      Done: "Cerrada",
+      "Won't do": "Descartada",
+      "In progress": "En curso",
+      "In review": "En revisión",
+      Merged: "Fusionada",
+      Released: "Publicada",
+      Ready: "Lista",
+      Backlog: "En espera",
+      Blocked: "Bloqueada",
+      "Needs owner": "Te toca",
+      Planning: "Planeando",
+      Active: "Activa",
+      Shipping: "En estreno",
+      "On hold": "En pausa",
+      Open: "Abierta",
+    } as Record<string, string>,
+    today: "Hoy",
+    week: (n: number, from: string, to: string) => `SEMANA ${n} · ${from} – ${to}`,
+    year: (y: string) => `AÑO ${y}`,
+    created: "Creada",
+    note: "Nota",
+    movedTo: (s: string) => `Pasó a ${s}`,
+    closed: "Cerrada",
+    leftDone: "Quedó en Done",
+  },
+  en: {
+    weekShort: ["M", "T", "W", "T", "F", "S", "S"] as readonly string[],
+    weekLong: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] as readonly string[],
+    months: ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"] as readonly string[],
+    types: {
+      bug: "Bug fixed",
+      code: "Feature",
+      ops: "Ops",
+      research: "Research",
+      "decision-needed": "Decision",
+      debt: "Debt",
+      idea: "Idea",
+      initiative: "Initiative closed",
+      pr: "PR merged",
+    } as Record<string, string>,
+    status: {
+      Done: "Closed",
+      "Won't do": "Dropped",
+      "In progress": "In progress",
+      "In review": "In review",
+      Merged: "Merged",
+      Released: "Released",
+      Ready: "Ready",
+      Backlog: "Waiting",
+      Blocked: "Blocked",
+      "Needs owner": "Your turn",
+      Planning: "Planning",
+      Active: "Active",
+      Shipping: "Shipping",
+      "On hold": "On hold",
+      Open: "Open",
+    } as Record<string, string>,
+    today: "Today",
+    week: (n: number, from: string, to: string) => `WEEK ${n} · ${from} – ${to}`,
+    year: (y: string) => `YEAR ${y}`,
+    created: "Created",
+    note: "Note",
+    movedTo: (s: string) => `Moved to ${s}`,
+    closed: "Closed",
+    leftDone: "Ended in Done",
+  },
+});
+const pw = () => say(PROGRESS_WORDS);
 
 export type ProjectCount = { slug: string; title: string; count: number };
 export type ProgressPr = { number: number; url: string; title: string };
@@ -207,7 +262,7 @@ export function clearProgressCache(): void {
 }
 
 export function progressTz(): string {
-  return process.env.PLANIA_TZ || "America/Mexico_City";
+  return screenTz();
 }
 
 export function isPruebaTitle(title: string): boolean {
@@ -315,7 +370,7 @@ export function typeOf(kind: string, workType: string | null): string {
 }
 
 export function typeLabel(type: string): string {
-  return TYPE_LABEL[type] ?? type;
+  return pw().types[type] ?? type;
 }
 
 function assertDay(value: string, field: string): string {
@@ -351,7 +406,7 @@ function previousSpan(range: Range, from: string): { from: string; to: string } 
 }
 
 function pretty(day: string): string {
-  const month = MONTHS[Number(day.slice(5, 7)) - 1] ?? "";
+  const month = pw().months[Number(day.slice(5, 7)) - 1] ?? "";
   return `${Number(day.slice(8, 10))} ${month}`;
 }
 
@@ -361,20 +416,22 @@ function cap(s: string): string {
 
 function rangeLabel(range: Range, from: string, to: string, today: string): string {
   if (range === "day") {
-    const name = from === today ? "Hoy" : cap(WEEK_LONG[weekdayIndex(from)] ?? "");
+    const name = from === today ? pw().today : cap(pw().weekLong[weekdayIndex(from)] ?? "");
     return `${name} · ${pretty(from)}`;
   }
   if (range === "week") {
     const { week } = isoWeek(from);
-    return `SEMANA ${week} · ${pretty(from).toUpperCase()} – ${pretty(to).toUpperCase()}`;
+    return pw().week(week, pretty(from).toUpperCase(), pretty(to).toUpperCase());
   }
-  return `AÑO ${from.slice(0, 4)}`;
+  return pw().year(from.slice(0, 4));
 }
 
+// PLA-I2-3: a project's place comes from its own row (settings.identity.order), else from its slug.
+let projectOrder = new Map<string, number>();
 function projectSort(a: string, b: string): number {
-  const ia = PROJECT_ORDER.indexOf(a);
-  const ib = PROJECT_ORDER.indexOf(b);
-  return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
+  const ia = projectOrder.get(a) ?? Number.MAX_SAFE_INTEGER;
+  const ib = projectOrder.get(b) ?? Number.MAX_SAFE_INTEGER;
+  return ia - ib || a.localeCompare(b);
 }
 
 function countsOf(map: Map<string, number>, titles: Titles): ProjectCount[] {
@@ -498,6 +555,13 @@ type Places = Map<string, Place>;
 
 async function loadPlaces(r: Reader): Promise<Places> {
   const rows = await r.find("projects", {}, { orderBy: [{ column: "slug" }] });
+  // PLA-I2-3: settings.identity.order, when it is a number, places the project.
+  projectOrder = new Map(
+    rows.flatMap((p) => {
+      const ord = p.settings?.identity?.order;
+      return typeof ord === "number" && Number.isFinite(ord) ? [[p.slug, ord] as const] : [];
+    }),
+  );
   return new Map(rows.map((p) => [p.id, { slug: p.slug, title: p.title }]));
 }
 
@@ -624,7 +688,7 @@ function monthBuckets(rows: TaskAgg[], year: number, titles: Titles): MonthBucke
     const month = `${year}-${String(i + 1).padStart(2, "0")}`;
     const slice = rows.filter((r) => cosa(r) && r.day.startsWith(month) && r.day >= from && r.day <= to);
     const total = slice.reduce((a, r) => a + r.n, 0);
-    return { month, label: (MONTHS[i] ?? "").toUpperCase(), total, by_project: byProject(slice, cosa, titles) };
+    return { month, label: (pw().months[i] ?? "").toUpperCase(), total, by_project: byProject(slice, cosa, titles) };
   });
 }
 
@@ -841,8 +905,8 @@ function buildSummary(
     const total = slice.reduce((a, r) => a + r.n, 0);
     return {
       date: d,
-      weekday: cap(WEEK_LONG[weekdayIndex(d)] ?? ""),
-      label: WEEK_SHORT[weekdayIndex(d)] ?? "",
+      weekday: cap(pw().weekLong[weekdayIndex(d)] ?? ""),
+      label: pw().weekShort[weekdayIndex(d)] ?? "",
       total,
       by_project: byProject(slice, cosa, titles),
     };
@@ -888,7 +952,7 @@ function buildSummary(
       is_best: streak.current > 0 && streak.current === streak.bestYear,
       week: eachDay(week.from, week.to).map((d) => ({
         date: d,
-        label: WEEK_SHORT[weekdayIndex(d)] ?? "",
+        label: pw().weekShort[weekdayIndex(d)] ?? "",
         active: active.has(d),
         upcoming: d > today,
       })),
@@ -1246,7 +1310,7 @@ export async function progressLog(db: Db, input: { from?: string; to?: string; p
         const total = [...map.values()].reduce((a, v) => a + v.count, 0);
         return {
           date: d,
-          weekday: cap(WEEK_LONG[weekdayIndex(d)] ?? ""),
+          weekday: cap(pw().weekLong[weekdayIndex(d)] ?? ""),
           total,
           best: peak > 0 && total === peak,
           by_project: [...map.entries()].map(([slug, v]) => ({ slug, title: v.title, count: v.count })).sort((a, b) => projectSort(a.slug, b.slug)),
@@ -1300,13 +1364,13 @@ export async function progressItem(db: Db, project: string, key: string): Promis
     const when = new Date(e.createdAt);
     const to = typeof e.payload.to === "string" ? e.payload.to : "";
     const text = typeof e.payload.text === "string" ? e.payload.text : typeof e.payload.note === "string" ? e.payload.note : "";
-    const label = e.type === "task.created" ? "Creada" : e.type === "note" ? "Nota" : STATUS_LABEL[to] ?? (to || e.type);
-    const body = e.type === "task.created" ? row.title : e.type === "note" ? text : to ? `Pasó a ${STATUS_LABEL[to] ?? to}` : "";
+    const label = e.type === "task.created" ? pw().created : e.type === "note" ? pw().note : pw().status[to] ?? (to || e.type);
+    const body = e.type === "task.created" ? row.title : e.type === "note" ? text : to ? pw().movedTo(pw().status[to] ?? to) : "";
     return { day: dayInTz(when, tz), time: timeInTz(when, tz), label, text: body };
   });
   if (timeline.length === 0) {
     timeline.push({ day: dayInTz(created, tz), time: timeInTz(created, tz), label: "Creada", text: row.title });
-    if (at) timeline.push({ day: dayInTz(at, tz), time: timeInTz(at, tz), label: "Cerrada", text: "Quedó en Done" });
+    if (at) timeline.push({ day: dayInTz(at, tz), time: timeInTz(at, tz), label: pw().closed, text: pw().leftDone });
   }
   const createdDay = dayInTz(created, tz);
   const closedDay = at ? dayInTz(at, tz) : null;

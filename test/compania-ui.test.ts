@@ -1,6 +1,6 @@
 // PLA-I30 blocks that PLA-I33 kept, rendered with fake data: Máquina's plumbing (the week's tokens per project
 // and for Asistente, plan guard, switches, En marcha, run log) with the 5e/5h banners, the per-block error, the
-// 5i stop sheet, the new-project dialog and the nav. Mover guardia shows only with canEdit. PLA-21: no budgets.
+// 5i stop sheet and the nav (NEWPROJ-1: the unused new-project dialog left). Mover guardia shows only with canEdit. PLA-21: no budgets.
 // Server-rendered with react-dom/server; no browser, no database.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -106,7 +106,7 @@ test("PLA-25: the Guardia block has a switch to go on past the guard, saying so 
 test("5b/5c a block that failed says so and offers Reintentar; unknown plan usage reads as high", () => {
   const err = html(h(parts.BlockError!, { what: "la compañía", onRetry: noop }));
   assert.ok(err.includes("No se pudo cargar la compañía."));
-  assert.ok(err.includes("Si la Mac está dormida, nada corre hasta que despierte."));
+  assert.ok(err.includes("Si la máquina está dormida, nada corre hasta que despierte."));
   assert.ok(err.includes("Reintentar"));
   const unknown = page(plumbing({ plan: { five_hour_pct: null, state: "unknown" } }));
   assert.ok(unknown.includes("Desconocido = alto"));
@@ -154,22 +154,6 @@ test("5i stop sheet names what closes, what stops starting and what is kept; no 
   assert.ok(proj.includes("Pausar Mianovia"));
 });
 
-test("new project (4a/4b): starts paused, and a missing endpoint is a clear error", () => {
-  const form = html(h(sheets.NewProjectForm!, { state: { kind: "idle" }, onSubmit: noop, onCancel: noop }));
-  assert.ok(form.includes("Meta, en una oración"));
-  assert.ok(form.includes("Empieza en pausa. Su PO despierta cuando lo reanudes."));
-  const missing = html(h(sheets.NewProjectForm!, { state: { kind: "missing" }, onSubmit: noop, onCancel: noop }));
-  assert.ok(missing.includes("el servidor no tiene esa ruta"));
-  assert.ok(missing.includes("No se creó nada."));
-  const done = html(h(sheets.NewProjectDone!, {
-    state: { kind: "done", name: "Viajia", goal: "Que alguien arme su viaje.", result: { slug: "viajia", key_prefix: "VIA", paused: true, po: "po-viajia", prompt_doc_id: "377b1840-9262-411e-b6c4-53ddff950665" } },
-    onOpen: noop,
-    onClose: noop,
-  }));
-  assert.ok(done.includes("Su PO despierta cuando lo reanudes"));
-  assert.ok(done.includes("Ver Viajia"));
-});
-
 test("limit editor: only the guard is left (PLA-21)", () => {
   assert.equal((sheets.limitTitle as unknown as (t: unknown) => string)({ kind: "guard", current: 70 }), "Mover guardia");
   const form = html(h(sheets.LimitForm!, { target: { kind: "guard", current: 70 }, onSave: noop, onCancel: noop }));
@@ -177,16 +161,16 @@ test("limit editor: only the guard is left (PLA-21)", () => {
   assert.equal(/Límite semanal|aviso al 80|código del dueño/i.test(form), false);
 });
 
-test("nav: the logo is Inicio and the header has exactly five links (Brief, D2); the phone tab bar has the same five on grid-cols-5", () => {
+test("nav: the logo is Inicio and the header has exactly four links (PLA-I63-5: Brief is a tab of Compañía); the phone tab bar has the same four on grid-cols-4", () => {
   const counts = { inbox: 3, chores: 2 };
   const header = html(h(React.Fragment, null, h(nav.Logo!, {}), h(nav.HeaderNav!, { counts })));
-  assert.equal(count(header, /<a /g), 6);
+  assert.equal(count(header, /<a /g), 5);
   const links = [...header.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(links, ["/", "/ceo", "/inbox", "/brief", "/progreso", "/machine"]);
+  assert.deepEqual(links, ["/", "/ceo", "/inbox", "/progreso", "/machine"]);
   for (const gone of ["/ahora", "/goals", "/equipo", "/tokens"]) assert.equal(header.includes(`href="${gone}"`), false, gone);
   const tabs = html(h(nav.TabBar!, { counts }));
-  assert.deepEqual([...tabs.matchAll(/href="([^"]+)"/g)].map((m) => m[1]), ["/ceo", "/inbox", "/brief", "/progreso", "/machine"]);
+  assert.deepEqual([...tabs.matchAll(/href="([^"]+)"/g)].map((m) => m[1]), ["/ceo", "/inbox", "/progreso", "/machine"]);
   assert.ok(tabs.includes("sm:hidden"));
-  assert.ok(tabs.includes("grid-cols-5"));
-  assert.ok(header.includes(">Brief<") && tabs.includes(">Brief<"));
+  assert.ok(tabs.includes("grid-cols-4"));
+  assert.ok(!header.includes(">Brief<") && !tabs.includes(">Brief<"));
 });

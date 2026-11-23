@@ -8,6 +8,7 @@ import { resetTestStore, useTestEnv, type TestStore } from "./helpers.js";
 import {
   CONTEXT_WINDOW_DAYS,
   FOOTPRINT_FRESH_MS,
+  envDriftFor,
   envDriftOf,
   readinessOf,
   type Readiness,
@@ -215,6 +216,18 @@ describe("readinessOf", () => {
       head,
     );
     assert.deepEqual(mixed, { behind: true, unknown: true });
+  });
+
+  test("PLA-115: a project that releases by branch has no env drift", () => {
+    const initiatives = [{ branch: "jl/corte" }];
+    const head = [{ name: "jl/corte", headSha: "abc123" }];
+    // A stale commit set by hand and a missing one: neither blocks nor cautions when release_on is branch.
+    assert.deepEqual(envDriftFor({ release_on: "branch" }, [{ commit: "fff" }], initiatives, head), { behind: false, unknown: false });
+    assert.deepEqual(envDriftFor({ release_on: "branch" }, [{ commit: null }], initiatives, head), { behind: false, unknown: false });
+    // Following the environment (env, or unset) keeps the drift as it was.
+    assert.deepEqual(envDriftFor({ release_on: "env" }, [{ commit: "fff" }], initiatives, head), { behind: true, unknown: false });
+    assert.deepEqual(envDriftFor({}, [{ commit: "fff" }], initiatives, head), { behind: true, unknown: false });
+    assert.deepEqual(envDriftFor({}, [{ commit: null }], initiatives, head), { behind: false, unknown: true });
   });
 
   test("caution: a recent event and no step to resume", () => {

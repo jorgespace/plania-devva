@@ -1,0 +1,132 @@
+// PLA-128: icons in the repo made from an older logo read «viejo» and the request redoes them. A throwaway store for
+// Plania's data and one for the pictures, a fake git whose commits Plania's own set fills, sharp on this machine.
+import assert from "node:assert/strict";
+import { after, before, beforeEach, test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import sharp from "sharp";
+import { resetTestStore, useTestEnv, type TestStore } from "./helpers.js";
+
+useTestEnv();
+const STORE = mkdtempSync(path.join(tmpdir(), "plania-pla128-"));
+process.env.PLANIA_CAPTURES_DIR = STORE;
+
+const pedido = await import("../src/brand/pedido.js");
+const marca = await import("../src/brand/marca.js");
+const logos = await import("../src/brand/logos.js");
+const surfaces = await import("../src/brand/surfaces.js");
+const { stageUpload, useUpload } = await import("../src/brand/upload.js");
+const { makeDb } = await import("../src/db/client.js");
+
+const svg = (bg: string) => Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="${bg}"/><path d="M28 72V28h44" stroke="#fff" stroke-width="12" fill="none" stroke-linecap="round"/></svg>`);
+let commits: Record<string, Record<string, Buffer>> = {};
+let tip = "";
+const git: import("../src/brand/logos.js").Git = async (_cwd, args) => {
+  const ok = (b: string | Buffer) => ({ code: 0, stdout: Buffer.isBuffer(b) ? b : Buffer.from(b) });
+  const no = { code: 1, stdout: Buffer.alloc(0) };
+  if (args[0] === "fetch") return ok("");
+  if (args[0] === "rev-parse") return args[3] === "sandbox^{commit}" && tip ? ok(tip) : no;
+  if (args[0] === "ls-tree") {
+    const files = commits[args[4]!];
+    return files ? ok(Object.entries(files).map(([p, b]) => `100644 blob ${"a".repeat(40)} ${b.length}\t${p}`).join("\0") + "\0") : no;
+  }
+  if (args[0] === "cat-file") {
+    const [c, p] = args[2]!.split(/:(.+)/);
+    const b = commits[c!]?.[p!];
+    return b ? ok(b) : no;
+  }
+  return no;
+};
+const base: Record<string, Buffer> = { "package.json": Buffer.from(`{"dependencies":{"next":"16.0.0"}}`), "src/app/layout.tsx": Buffer.from("export default function L() { return null; }") };
+const commit = (files: Record<string, Buffer>) => {
+  tip = String(Object.keys(commits).length + 1).repeat(40).slice(0, 40);
+  commits[tip] = files;
+};
+const read = async () => {
+  marca.forgetMarca();
+  logos.forgetLogoLooks();
+  return (await marca.marcaRead(db, "tienda", { git, fresh: true }))!;
+};
+const pickLogo = async (bg: string) => {
+  const s = await stageUpload("tienda", svg(bg), `logo-${bg.slice(1)}.svg`);
+  await useUpload(db, project, { up: s.up, name: s.name, scale: 100, bg: null }, { agent: "owner", session_id: "web" });
+};
+/** What Taller does: every file of Plania's set lands in the repo as it is. */
+const placeAll = async () => {
+  await read();
+  const set = (await pedido.buildSet(db, project, "todo"))!;
+  const next = { ...commits[tip] };
+  for (const f of set.files) next[f.path] = f.bytes;
+  commit(next);
+};
+
+let ts: TestStore;
+let db: ReturnType<typeof makeDb>["db"];
+let project: import("../src/db/schema.js").Project;
+before(async () => {
+  ts = await resetTestStore();
+  db = makeDb().db;
+});
+after(async () => {
+  await ts.end();
+  rmSync(STORE, { recursive: true, force: true });
+});
+beforeEach(async () => {
+  commits = {};
+  commit({ ...base });
+  rmSync(path.join(STORE, "_marca", "tienda"), { recursive: true, force: true });
+  // A fresh «tienda» each time: no foreign keys here, so its rows go with it by hand.
+  project = await ts.fix(async (uow) => {
+    await uow.delete("projectLogos", {});
+    const old = await uow.get("projects", { slug: "tienda" });
+    if (old) {
+      await uow.delete("tasks", { projectId: old.id });
+      await uow.delete("events", { projectId: old.id });
+      await uow.delete("projects", { id: old.id });
+    }
+    return uow.insert("projects", { slug: "tienda", title: "Tienda", keyPrefix: "TND" });
+  });
+  project.settings ??= {};
+});
+
+test("#1 #2 a new logo turns the repo's icons from the old one «viejo»; the request redoes them; then nothing is viejo", async () => {
+  await pickLogo("#1d4ed8");
+  await placeAll();
+  const first = await read();
+  assert.deepEqual(first.rows.filter((r) => r.state === "viejo"), [], "the repo has this logo's files");
+  assert.ok(first.rows.filter((r) => r.state === "ok").length >= 8);
+
+  await pickLogo("#b91c1c");
+  const after = await read();
+  const old = after.rows.filter((r) => r.state === "viejo").map((r) => r.id).sort();
+  // PLA-I69-1: the manifest's colour is the old logo's too, so it reads old (an edit, not a new file).
+  assert.deepEqual(old, ["a192", "a512", "apple", "ico", "man", "mask", "og", "svg"].sort(), "every compared icon is from the old logo (mono is a white silhouette of the same drawing)");
+  assert.ok(after.rows.find((r) => r.id === "apple")!.checks.some((c) => c.k === "old_logo" && !c.ok));
+  const set = (await pedido.buildSet(db, project, "faltan"))!;
+  for (const id of old.filter((x) => x !== "man")) assert.ok(set.plan.items.some((i) => i.key === id && i.op === "~"), `${id} is redone in place`);
+  assert.ok(set.plan.edits.some((e) => e.what === "manifest_theme"), "the manifest's colour is edited");
+
+  await placeAll();
+  assert.deepEqual((await read()).rows.filter((r) => r.state === "viejo"), [], "once Taller places the new set, nothing is viejo");
+});
+
+test("#1 a surface's own icon is compared with its own files; a logo found in the repo leaves the icons be", async () => {
+  await pickLogo("#1d4ed8");
+  const s = await stageUpload("tienda", svg("#047857"), "android.svg");
+  await surfaces.setSurface(project, "android", { up: s.up, name: s.name, scale: 70, bg: "#f4ede4" });
+  await placeAll();
+  await pickLogo("#b91c1c");
+  const r = await read();
+  for (const id of ["a192", "a512", "mask"]) assert.equal(r.rows.find((x) => x.id === id)!.state, "ok", `${id} keeps Android's own icon`);
+  assert.equal(r.rows.find((x) => x.id === "apple")!.state, "viejo");
+  assert.ok(r.surfaces.android);
+
+  // A project whose logo Plania found in its repo: its other icons are its own, never «viejo».
+  await ts.fix((uow) => uow.delete("projectLogos", {}));
+  rmSync(path.join(STORE, "_marca", "tienda", "surfaces.json"), { force: true });
+  commit({ ...commits[tip], "public/brand/logo.svg": svg("#7c3aed") });
+  const found = await read();
+  assert.equal(found.logo?.source, "repo");
+  assert.deepEqual(found.rows.filter((x) => x.state === "viejo"), []);
+});

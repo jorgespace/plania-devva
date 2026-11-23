@@ -54,7 +54,7 @@ test("src/gate does not spawn security", () => {
 
 const A = { agent: "test-agent", session_id: "s1", machine: "ci" };
 const P = { project: "workia" };
-const SCREEN = { agent: "jorge", session_id: "web", machine: "screen" };
+const SCREEN = { agent: "owner", session_id: "web", machine: "screen" };
 
 let client: Client;
 let store: TestStore;
@@ -129,7 +129,7 @@ describe("screen gates", () => {
       const row = (await store.get("questions", { id: stored.question.id }))!;
       assert.equal(row.question, `¿La seguimos? ${mark}`);
     }
-    assert.equal((await call("get_task", { key: ticket.key })).status, "Needs Jorge");
+    assert.equal((await call("get_task", { key: ticket.key })).status, "Needs owner");
     const plain = await call("ask", { key: idea.key, question: "¿Sin el campo?" });
     assert.equal(plain.hint, undefined);
   });

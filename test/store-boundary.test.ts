@@ -13,6 +13,10 @@ import * as schema from "../src/db/schema.js";
 const ALLOWED: Record<string, string> = {
   "src/jobs/machine/collect.ts": "a pg client that lists the machine's Postgres databases (inventory, not plania's data)",
   "src/maquinas/reader.ts": "a pg client that reads a project's own local dev database (not plania's data)",
+  "src/maquinas/numeros.ts": "a pg client that reads the sizes of a project's own test-copy databases (not plania's data)",
+  "src/camino/store.ts": "a pg client on a project's own local Postgres, for Camino's environments (not plania's data)",
+  "src/lib/pg-connect.ts": "what a project's own Postgres address answers, for its test copies (not plania's data)",
+  "src/runner/delete-project.ts": "reads the schema's foreign keys (getTableConfig) to delete a project's rows through the store, which has none",
 };
 
 const ROOT = path.resolve(import.meta.dirname, "..");

@@ -3,14 +3,20 @@
 // `claude -p` in a worktree outside every repo. When it exits, its result is read: modelUsage goes
 // to report_tokens per model, the turns/session/subtype to heartbeat_runs, the session to agent_sessions.
 // Summaries never carry paths, env values, tokens or money.
+import { commitHooks, commitInstructions } from "../camino/commits.js";
+import { workPatternOf } from "../camino/store.js";
 import { canvasesRoot } from "../pedidos/frames.js";
 import { resolveMotor } from "./motor.js";
 import { execFile } from "node:child_process";
+import { projectEnvNames } from "./run-env.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import path from "node:path";
+import { resolveClaudeBin } from "../lib/claude-bin.js";
+import { defaultRunLogDir, defaultRunTmpDir } from "../lib/run-dirs.js";
 import { makeDb, type Db } from "../db/client.js";
+import { bus } from "../events.js";
 import type { Agent, AgentRun, AdapterConfig, RunTrigger, Project } from "../db/schema.js";
 import { registerFootprint, releaseFootprint } from "../mcp/footprint.js";
 import { SYSTEM_ACTOR, WEB_ACTOR, type Ctx, type Q } from "../mcp/tx.js";
@@ -18,8 +24,18 @@ import { reportTokens, type ReportTokensInput } from "../mcp/usage.js";
 import { storeOf, readerOf } from "../store/port.js";
 import { lte, ne, notNull } from "../store/types.js";
 import type { UnitOfWork } from "../store/types.js";
-import { CONSULTA_DENY_RULES, QA_DENY_RULES, denySettings } from "./deny.js";
+import { CONSULTA_DENY_RULES, QA_DENY_RULES, TRIAL_DENY_RULES, afterEditHooks, denySettings, selfRules } from "./deny.js";
+import { isSelfProject, liveStorePrefix, selfRunProblem, serverRoot } from "../self/plania-self.js";
+import { kitLines, skillVersion, writeKitPlugin, type KitWritten } from "./kit.js";
+import { rolePrompt } from "./prompts.js";
+import { mannerBlock, mannerVersion, resolvedKit } from "./skills.js";
+import { lessonBlock, lessonsForRun, recordKnowledge } from "./lessons.js";
+import { voiceBlock } from "../brand/voz.js";
+import { addTrialCopy, setTrial, trialById, trialIdOfRun, trialKit, trialPathFor, trialPrompt, trialResult, trialScope, trialStatusOf } from "./trial.js";
+import { fixedWords, lessonRoomOf } from "./lesson-watch.js";
 import { consultaById, consultaPrompt } from "../pedidos/consultas.js";
+import { marksPrompt, marksRequestOfRun } from "../brand/marks.js";
+import { uploadDir } from "../brand/upload.js";
 import { ACTIVE_STATUSES, activeRunOn, consultaIdOfRun, insertRun, notifyQueue, setQueueKick, workKeyOf } from "./queue.js";
 import { runSession } from "./run-session.js";
 import {
@@ -40,9 +56,11 @@ import {
   type HeldCode,
   type MachineFacts,
 } from "./admission.js";
-import { areasOverlap } from "../mcp/writes.js";
+import { areasOverlap, claim, setTask } from "../mcp/writes.js";
+import { isShared, sharedAreasOf } from "./touched.js";
 import { PREGUNTA_MARK } from "../captures/preguntas.js";
-import { EVENT_SUMMARY, enqueueWake, wakePoIfWaiting } from "./events.js";
+import { tallerDatabase } from "../captures/prueba.js";
+import { EVENT_SUMMARY, enqueueWake, serviceAgent, wakePoIfWaiting } from "./events.js";
 import { capacityFacts, capacityHold, agentFacts, agentHold, projectGoal } from "./hold.js";
 
 export { projectGoal };
@@ -55,6 +73,7 @@ import {
   loadSettings,
   planGuardSummary,
   planView,
+  readingStale,
   recordReading,
   roleOf,
   writeVia,
@@ -77,10 +96,29 @@ import {
   type SpawnFn,
   type Supervised,
 } from "./process.js";
+import { DEFAULT_START_BRANCH, startBranchOf } from "./start-branch.js";
+import { isSignedOut } from "./signed-out.js";
 import { StreamReader, parseStream, parseUsageText, totalOf, type PlanWindowReading } from "./stream.js";
 import { clearPacks, packLines, packsInDiff, packsOf, writePacks } from "./packs.js";
-import { branchFor, checkBase, defaultGit, ensureWorktree, removeWorktree, repoPathOf, scratchPathFor, worktreePathFor, worktreeRoot, carefulGit, resetGitThrottleForTests, type GitFn } from "./worktree.js";
+import { earlyBaseOf, stackBaseOf, type StackBase } from "./stack.js";
+import { velocidadOf } from "./velocidad.js";
+import { cloneModules } from "../lib/clone-modules.js";
+import { heavyEnv } from "./heavy.js";
+import { planStepFor } from "../mcp/plan-step.js";
+import { branchFor, checkBase, defaultGit, ensureReadCopy, ensureWorktree, removeWorktree, repoPathOf, scratchPathFor, worktreePathFor, worktreeRoot, carefulGit, resetGitThrottleForTests, type GitFn } from "./worktree.js";
 import { taskImagePaths } from "../pedidos/images.js";
+import { carryReferences, markOpened, referenceLines, type ReferenceLine } from "./references.js";
+import { personalize } from "../owner.js";
+import { languageLine } from "./owner-language.js";
+import { storedRunnerToken } from "../install-state.js";
+import { defineWords, say } from "../words.js";
+import { ST } from "../state/status.js";
+
+// PLA-I2-10: the stop reason the owner reads when they stop a run, in the install's language; the Spanish is unchanged.
+export const RUNNER_WORDS = defineWords({
+  es: { stoppedFromCompany: "detenido desde Compañía" },
+  en: { stoppedFromCompany: "stopped from Company" },
+});
 
 export type ReadyWork = {
   project: string;
@@ -92,6 +130,8 @@ export type ReadyWork = {
 };
 
 export type RunnerDeps = {
+  // PLA-I2-9: the running server's own checkout, to tell a run of Plania itself (src/self/plania-self.ts). Tests set it.
+  serverRoot?: string;
   spawn?: SpawnFn;
   kill?: KillFn;
   git?: GitFn;
@@ -130,7 +170,7 @@ const live = new Map<string, LiveRun>();
 let lastProbeAt = 0;
 const PROBE_EVERY_MS = 5 * 60_000;
 const MINUTE = 60_000;
-const DONE_STATUSES = ["Merged", "Released", "Done", "Won't do"];
+const DONE_STATUSES: string[] = [ST.merged, ST.released, ST.done, ST.wontDo];
 export const RUNNER_ADAPTER = "claude_code" as const;
 
 // Serializes the checks and the start so two wakes never both take the last slot.
@@ -202,16 +242,15 @@ export function resetRunnerForTests(): void {
 }
 
 const home = (env: NodeJS.ProcessEnv) => env.HOME || homedir();
-const logDirOf = (deps: RunnerDeps, env: NodeJS.ProcessEnv) => deps.logDir ?? path.join(home(env), "Library", "Logs", "plania-runs");
-const tmpDirOf = (deps: RunnerDeps) => deps.tmpDir ?? path.join(tmpdir(), "plania-runs");
+// PLA-I2-4: the system's own places (src/lib/run-dirs.ts): ~/Library/Logs on macOS, the XDG dirs on Linux.
+const logDirOf = (deps: RunnerDeps, env: NodeJS.ProcessEnv) => deps.logDir ?? defaultRunLogDir(env);
+const tmpDirOf = (deps: RunnerDeps) => deps.tmpDir ?? defaultRunTmpDir(deps.env ?? process.env);
 const rootOf = (deps: RunnerDeps, env: NodeJS.ProcessEnv) => deps.worktreeRoot ?? worktreeRoot(env);
-const ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
-
-function claudeCommand(config: AdapterConfig | null, env: NodeJS.ProcessEnv): string {
-  const named = config?.command_env;
-  if (typeof named === "string" && ENV_NAME.test(named) && env[named]?.trim()) return env[named]!.trim();
-  if (env.CLAUDE_CODE_BIN?.trim()) return env.CLAUDE_CODE_BIN.trim();
-  return path.join(home(env), ".local", "bin", "claude");
+// NEWPROJ-4: exported for the readiness list (./readiness.ts), which looks for the same binary without running it.
+// PLA-I2-4: the rule itself is shared with the brief and the machine check (src/lib/claude-bin.ts): the adapter's
+// variable, CLAUDE_CODE_BIN, ~/.local/bin/claude, then claude on PATH.
+export function claudeCommand(config: AdapterConfig | null, env: NodeJS.ProcessEnv): string {
+  return resolveClaudeBin(env, { commandEnv: config?.command_env });
 }
 
 const sysCtx = (tool: string): Ctx => ({ actor: { ...SYSTEM_ACTOR, machine: hostname() }, system: true, tool });
@@ -227,7 +266,7 @@ type WakeContext = {
   role: RunnerRole | null;
   project: Project | null;
   task: ReadyWork | null;
-  taskRow: { branch: string | null; base: string | null } | null;
+  taskRow: { id?: string | null; branch: string | null; base: string | null } | null;
 };
 
 // PLA-I32-5: an agent's project is its team's (project_id); Asistente's is its home project (where its runs
@@ -243,12 +282,26 @@ async function projectOfAgent(db: Q, agent: Agent): Promise<Project | null> {
 }
 
 // The ticket's branch, and its base: its own, else its initiative's.
-async function taskBranchInfo(db: Q, projectId: string, key: string): Promise<{ branch: string | null; base: string | null }> {
+async function taskBranchInfo(db: Q, projectId: string, key: string): Promise<{ id: string | null; branch: string | null; base: string | null }> {
   const r = readerOf(db);
   const t = await r.get("tasks", { projectId, key });
-  if (!t) return { branch: null, base: null };
+  if (!t) return { id: null, branch: null, base: null };
   const parent = t.parentId ? await r.get("tasks", { id: t.parentId }) : undefined;
-  return { branch: t.branch, base: t.baseBranch ?? parent?.baseBranch ?? null };
+  return { id: t.id, branch: t.branch, base: t.baseBranch ?? parent?.baseBranch ?? null };
+}
+
+// PLA-89: Research and Artist are woken for an idea's stage (research, design). A wake queued for a stage the idea
+// has left (it moved on, or went back) ends without a run: on MIA-IDEA4 (guided test PLA-86) two such wakes would
+// have redone Research and Design after the idea had reached Plan. Returns the stage it is on now, or null to run.
+const STAGE_OF_ROLE: Partial<Record<RunnerRole, string>> = { research: "research", artist: "design" };
+export function stageMovedOn(role: RunnerRole | null, kind: string | null | undefined, stage: string | null | undefined): string | null {
+  const want = role ? STAGE_OF_ROLE[role] : undefined;
+  if (!want || kind !== "idea" || !stage) return null;
+  return stage === want ? null : stage;
+}
+async function ideaStageOf(db: Q, projectId: string, key: string): Promise<{ kind: string; stage: string | null } | null> {
+  const t = await readerOf(db).get("tasks", { projectId, key });
+  return t ? { kind: t.kind, stage: t.stage } : null;
 }
 
 async function loadContext(db: Q, agent: Agent, task: ReadyWork | null): Promise<WakeContext> {
@@ -276,7 +329,7 @@ async function probeIfUnknown(db: Db, deps: RunnerDeps, now: Date): Promise<void
 // PLA-I40-2: skipRest and pastGuard are the owner's "start now" from the screen, for one run: the rest between
 // runs is not counted, and the plan guard reads as with the override on. Every other check stands.
 // noCap (PLA-I60-2): admission checks the plan and the caps itself, inside its write.
-async function preflight(db: Q, ctx: WakeContext, now: Date, deps: RunnerDeps, opts: { fromQueue?: string; skipRest?: boolean; pastGuard?: boolean; consulta?: boolean; trigger?: RunTrigger; noCap?: boolean } = {}): Promise<Preflight> {
+async function preflight(db: Q, ctx: WakeContext, now: Date, deps: RunnerDeps, opts: { fromQueue?: string; skipRest?: boolean; pastGuard?: boolean; consulta?: boolean; trial?: boolean; marks?: boolean; trigger?: RunTrigger; noCap?: boolean } = {}): Promise<Preflight> {
   const settings = await loadSettings(db);
   const { agent, role, project, task } = ctx;
   if (!project) return { ok: false, kind: "skipped", summary: "skipped: no project" };
@@ -291,11 +344,15 @@ async function preflight(db: Q, ctx: WakeContext, now: Date, deps: RunnerDeps, o
   if (!role) return { ok: false, kind: "skipped", summary: "skipped: no runner role" };
   if (own?.code === "paused") return { ok: false, kind: "skipped", summary: `skipped: project ${project.slug} paused` };
   if (own?.code === "rest") return { ok: false, kind: "skipped", summary: "skipped: cooldown" };
-  if (own?.code === "no_goal" && !opts.consulta) return { ok: false, kind: "skipped", summary: "skipped: no goal" };
-  if (!task && role !== "product-owner" && role !== "asistente") return { ok: false, kind: "skipped", summary: "no ready work" };
+  // PLA-I67-6: a skill trial is the owner's own ask, about a delivery already made: no goal and no ticket needed.
+  // PLA-118: logo marks (Artist, «[marcas <id>]») are the owner's own ask too: no ticket and no goal needed.
+  if (own?.code === "no_goal" && !opts.consulta && !opts.trial && !opts.marks) return { ok: false, kind: "skipped", summary: "skipped: no goal" };
+  if (!task && role !== "product-owner" && role !== "asistente" && !opts.trial && !opts.marks) return { ok: false, kind: "skipped", summary: "no ready work" };
 
   if (task) {
-    const base = checkBase(ctx.taskRow?.branch ?? branchFor(task.key), ctx.taskRow?.base ?? null);
+    // PLA-I2-5: the project's start branch is the only base (settings.start_branch, never a protected one).
+    const start = startBranchOf(project.settings);
+    const base = checkBase(ctx.taskRow?.branch ?? branchFor(task.key, await workPatternOf(db, project.id)), ctx.taskRow?.base ?? null, start);
     if (!base.ok) return { ok: false, kind: "fail", summary: "fail: base not allowed" };
   }
 
@@ -356,6 +413,28 @@ export async function wakeClaude(
   });
 }
 
+// PLA-I67-6: the owner's «Probar». The trial's run is queued and admitted like any run (caps, plan guard); the
+// trial row follows it (queued while it waits, skipped or failed when it cannot start).
+export async function startTrial(db: Db, input: { agent: Agent; trialId: string; now: Date }, deps: RunnerDeps = {}): Promise<WakeOutcome> {
+  return serial(async () => {
+    const trial = await trialById(db, input.trialId);
+    if (!trial) return { kind: "fail", summary: "fail: no such trial", taskKey: null };
+    const project = (await readerOf(db).get("projects", { id: trial.projectId })) ?? null;
+    const role = roleOf(input.agent);
+    if (!project || !role) {
+      await setTrial(db, trial.id, { status: "skipped", summary: "skipped: no runner role", finishedAt: input.now });
+      return { kind: "skipped", summary: "skipped: no runner role", taskKey: null };
+    }
+    const settings = await loadSettings(db);
+    const out = await insertRun(db, { agent: input.agent, project, role, taskKey: null, trialId: trial.id, trigger: "trial", summary: "starting", queuedAt: input.now, reserveTokens: settings.reserveTokens });
+    if (out.kind === "coalesced") return { kind: "coalesced", summary: "coalesced" };
+    await setTrial(db, trial.id, { runId: out.run.id });
+    const outcome = outcomeOf(await admit(db, input.now, deps, { only: out.run.id }), out.run.id, null);
+    if (outcome.kind === "queued") await setTrial(db, trial.id, { status: "queued", summary: outcome.summary });
+    return outcome;
+  });
+}
+
 // PLA-I40-2: the owner's "Que empiece ya". Starts this agent's queued run now, or, with none queued, one run on
 // the Ready work given. The rest between runs is skipped for this run only (nothing is stored, so the next run
 // waits its full rest); pastGuard also lets it past the plan guard. The switches, the goal, the base branch and
@@ -382,7 +461,8 @@ export async function startNow(
     const task = queued ? (queued.taskKey ? await readyWorkOf(db, queued.projectId, queued.taskKey) : null) : input.task;
     const ctx = await loadContext(db, input.agent, task);
     if (!ctx.project && queued) ctx.project = (await r.get("projects", { id: queued.projectId })) ?? null;
-    const pre = await preflight(db, ctx, input.now, deps, { skipRest: true, pastGuard: input.pastGuard, consulta: queued?.lane === "consulta" });
+    const marksRun = !task && ctx.role === "artist" && queued?.lane === "work" && !!ctx.project && !!marksRequestOfRun(ctx.project.slug, queued.reason);
+    const pre = await preflight(db, ctx, input.now, deps, { skipRest: true, pastGuard: input.pastGuard, consulta: queued?.lane === "consulta", marks: marksRun });
     if (!pre.ok && pre.kind !== "cap") return { kind: "held", summary: pre.summary };
     let run = queued;
     if (!run) {
@@ -434,7 +514,7 @@ export async function canStart(db: Db, agent: Agent, projectId: string, taskKey:
 // Queued runs start here, from any process: one serialized store write decides which runs start (status starting,
 // their lock keys taken, worker and lease set); the processes spawn after it commits. Checks, in order: the run's own
 // verdict (switches, goal, base branch, the rest for cadence runs), the company ceiling minus reserved slots, this
-// worker's capacity and the Mac's free memory and disk, the start rate, the plan guard (a stopped plan ends the run as
+// worker's capacity and the machine's free memory and disk, the start rate, the plan guard (a stopped plan ends the run as
 // before; a projection that would cross the guard holds it), the project's lane cap, the agent's cap, the lock keys,
 // and overlapping areas for code runs. A run that waits keeps a held_code the screen reads. `only` admits one run (a
 // wake or the owner's «Que empiece ya»); skipRest and pastGuard apply to it alone.
@@ -459,6 +539,7 @@ const HOLD_SUMMARY: Record<HeldCode, string> = {
   rest: "queued: cooldown",
   lock: "queued: same branch or ticket is busy",
   areas: "queued: same files are busy",
+  seat_paused: "queued: the owner paused this seat",
 };
 
 // Queue order: questions first, then the owner's own asks, then the ticket's priority (none last), then the oldest.
@@ -480,7 +561,9 @@ export async function admit(db: Db, now: Date, deps: RunnerDeps = {}, opts: Admi
   const result: AdmitResult = { started: 0, dropped: 0, outcomes: new Map() };
   const settings = await loadSettings(db);
   // The free /usage probe runs outside the write.
-  if (planView(await lastReading(db), settings.planGuardPct, now, settings.guardOverride).state === "unknown") await probeIfUnknown(db, deps, now);
+  // PLA-144: probe whenever the last reading is stale, also with the override on (state "ok" there), so the screen's
+  // meter gets a fresh figure without waiting for a run to start.
+  if (readingStale(await lastReading(db), now)) await probeIfUnknown(db, deps, now);
   const machine = await machineFacts(deps, env);
   const worker = workerId(env);
   const capacity = workerCapacity(env);
@@ -541,7 +624,9 @@ export async function admit(db: Db, now: Date, deps: RunnerDeps = {}, opts: Admi
     const hold = async (run: AgentRun, code: HeldCode, detail: Record<string, unknown>) => {
       outcomes.set(run.id, { kind: "held", code, summary: HOLD_SUMMARY[code] });
       // Written when the reason changes (the numbers in it move every pass; the screen reads live counts anyway).
-      if (run.heldCode !== code) await uow.update("agentRuns", { id: run.id }, { heldCode: code, heldDetail: detail });
+      // PLA-58: an areas hold names the ticket and files, so a different one is written too.
+      const moved = run.heldCode !== code || (code === "areas" && JSON.stringify(run.heldDetail ?? {}) !== JSON.stringify(detail));
+      if (moved) await uow.update("agentRuns", { id: run.id }, { heldCode: code, heldDetail: detail });
     };
     const holdRest = async (from: number, code: HeldCode, detail: Record<string, unknown>, lane?: string) => {
       const rest = ordered.slice(from).filter((q) => (!lane || q.run.lane === lane) && !outcomes.has(q.run.id));
@@ -575,11 +660,21 @@ export async function admit(db: Db, now: Date, deps: RunnerDeps = {}, opts: Admi
       // The caps first: they need no read, and most of a long queue waits on them (load test, PLA-I60-6).
       const agent = agentById.get(run.agentId);
       if (!agent) continue;
+      // PLA-I71-3: a seat the owner paused starts nothing; its runs wait in the queue until it is resumed.
+      if (agent.pausedAt) {
+        await hold(run, "seat_paused", {});
+        continue;
+      }
       {
-        const lim = projectLimits(projectById.get(run.projectId)?.settings?.runner);
+        const ps = projectById.get(run.projectId)?.settings;
+        const lim = projectLimits(ps?.runner);
+        // PLA-I73-5: lanes. Unless the owner set the project's caps by hand, a project runs settings.velocidad.carriles
+        // work runs at once (2 by default) and its Taller seat that many steps; areas still never overlap (below).
+        const carriles = velocidadOf(ps).carriles;
+        const workCap = ps?.runner?.max_concurrent ?? Math.max(lim.maxConcurrent, carriles);
         if (run.lane === "consulta" || agent.projectId) {
           const used = c.byProjectLane.get(`${run.projectId}:${run.lane}`) ?? 0;
-          const cap = run.lane === "consulta" ? lim.consultaSlots : lim.maxConcurrent;
+          const cap = run.lane === "consulta" ? lim.consultaSlots : workCap;
           if (used >= cap) {
             await hold(run, "project_cap", { running: used, cap, lane: run.lane });
             continue;
@@ -587,7 +682,7 @@ export async function admit(db: Db, now: Date, deps: RunnerDeps = {}, opts: Admi
         }
         if (run.lane === "work") {
           const used = c.byAgent.get(agent.id) ?? 0;
-          const cap = agentCapOf(agent, lim);
+          const cap = run.role === "taller" && agent.maxParallel == null && ps?.runner?.max_per_agent == null ? Math.max(agentCapOf(agent, lim), carriles) : agentCapOf(agent, lim);
           if (used >= cap) {
             await hold(run, "agent_cap", { running: used, cap });
             continue;
@@ -598,7 +693,9 @@ export async function admit(db: Db, now: Date, deps: RunnerDeps = {}, opts: Admi
       const ctx = await loadContext(tx, agent, task);
       if (!ctx.project) ctx.project = (await uow.get("projects", { id: run.projectId })) ?? null;
       const mine = opts.only === run.id;
-      const pre = await preflight(tx, ctx, now, deps, { fromQueue: run.id, consulta: run.lane === "consulta", trigger: run.trigger, skipRest: mine && opts.skipRest, noCap: true });
+      // PLA-118: a task-less Artist run woken for a marks request still drawing.
+      const marksRun = !task && ctx.role === "artist" && run.lane === "work" && !!ctx.project && !!marksRequestOfRun(ctx.project.slug, run.reason);
+      const pre = await preflight(tx, ctx, now, deps, { fromQueue: run.id, consulta: run.lane === "consulta", trial: run.trigger === "trial", marks: marksRun, trigger: run.trigger, skipRest: mine && opts.skipRest, noCap: true });
       if (!pre.ok && pre.summary === "skipped: cooldown") {
         await hold(run, "rest", {});
         continue;
@@ -608,6 +705,17 @@ export async function admit(db: Db, now: Date, deps: RunnerDeps = {}, opts: Admi
         outcomes.set(run.id, { kind: "ended", status: pre.kind === "fail" ? "fail" : "skipped", summary: pre.summary });
         dropped += 1;
         continue;
+      }
+      if (run.lane === "work" && run.taskKey && ctx.role && STAGE_OF_ROLE[ctx.role]) {
+        const t = await ideaStageOf(tx, run.projectId, run.taskKey);
+        const now_ = stageMovedOn(ctx.role, t?.kind, t?.stage);
+        if (now_) {
+          const summary = `skipped: the idea moved on (stage ${now_})`;
+          await endWithoutProcess(tx, run, "skipped", summary, now);
+          outcomes.set(run.id, { kind: "ended", status: "skipped", summary });
+          dropped += 1;
+          continue;
+        }
       }
       // The plan: a stopped (or unknown) plan ends the run as it always did; requeueHeld queues it again later.
       const view = planView(reading, settings.planGuardPct, now, settings.guardOverride || (mine && !!opts.pastGuard));
@@ -642,8 +750,9 @@ export async function admit(db: Db, now: Date, deps: RunnerDeps = {}, opts: Admi
       const limits = projectLimits(ctx.project?.settings?.runner);
       const team = !!agent.projectId;
       const project = ctx.project!;
-      const branch = task ? ctx.taskRow?.branch?.trim() || branchFor(task.key) : null;
-      const cwd = run.lane === "consulta" ? null : task ? safePath(() => worktreePathFor(root, project.slug, task.key)) : scratchPathFor(root, project.slug, agent.slug);
+      const branch = task ? ctx.taskRow?.branch?.trim() || branchFor(task.key, await workPatternOf(tx, project.id)) : null;
+      const trialId = trialIdOfRun(run);
+      const cwd = run.lane === "consulta" ? null : trialId ? safePath(() => trialPathFor(root, project.slug, trialId)) : task ? safePath(() => worktreePathFor(root, project.slug, task.key)) : scratchPathFor(root, project.slug, agent.slug);
       const keys = lockKeysOf({ projectId: project.id, taskKey: run.taskKey, branch: run.lane === "consulta" ? null : branch, cwd });
       // The run_locks primary key on main: a key another live run holds stops this one (takeLocks reads and inserts
       // in this same write).
@@ -652,9 +761,10 @@ export async function admit(db: Db, now: Date, deps: RunnerDeps = {}, opts: Admi
         await hold(run, "lock", { keys: taken.held });
         continue;
       }
-      if (limits.serializeAreas && ctx.role === "taller" && task && (await areasClash(tx, project.id, task.key))) {
+      const clash = limits.serializeAreas && ctx.role === "taller" && task ? await areasClash(tx, project.id, task.key, sharedAreasOf(project.settings?.runner)) : null;
+      if (clash) {
         await releaseLocks(tx, run.id);
-        await hold(run, "areas", {});
+        await hold(run, "areas", clash);
         continue;
       }
       const [updated] = await uow.update(
@@ -719,15 +829,28 @@ const safePath = (fn: () => string): string | null => {
 };
 
 // A code run waits while a live code run in the same project lists areas that overlap its ticket's.
-async function areasClash(tx: Q, projectId: string, key: string): Promise<boolean> {
+// PLA-58: the live run's areas include what it really changed (sweepTouched). And shared paths (shadcn's
+// components/ui, package.json, lockfiles…) are everyone's: while a live run touches one, every other code run
+// waits; a ticket that declares one waits for any live code run. The hold names the other ticket and the files.
+export async function areasClash(tx: Q, projectId: string, key: string, shared: string[] = []): Promise<{ with: string; files: string[] } | null> {
   const r = readerOf(tx);
   const a = (await r.get("tasks", { projectId, key }))?.areas ?? [];
-  if (a.length === 0) return false;
+  const mineShared = a.filter((y) => isShared(y, shared));
+  // The live code runs of the project on another ticket, each with its ticket's areas (a run whose ticket is gone has
+  // no row to join, as the inner join had none).
   for (const o of await r.find("agentRuns", { projectId, status: ["starting", "running"], role: "taller", taskKey: ne(key) })) {
-    const t = await r.get("tasks", { projectId: o.projectId, key: o.taskKey! });
-    if (t && (t.areas ?? []).some((x) => a.some((y) => areasOverlap(x, y)))) return true;
+    if (o.taskKey === null) continue;
+    const t = await r.get("tasks", { projectId: o.projectId, key: o.taskKey });
+    if (!t) continue;
+    const theirs = t.areas ?? [];
+    const files = [
+      ...theirs.filter((x) => a.some((y) => areasOverlap(x, y))),
+      ...theirs.filter((x) => isShared(x, shared)),
+      ...mineShared,
+    ];
+    if (files.length) return { with: t.key, files: [...new Set(files)].slice(0, 3) };
   }
-  return false;
+  return null;
 }
 
 // The motor a run would start with (for its plan weight).
@@ -789,6 +912,9 @@ async function endWithoutProcess(db: Q, run: AgentRun, status: "skipped" | "fail
   await runWrite(db, run, async (uow) => {
     await uow.update("agentRuns", { id: run.id }, { status, summary: summary.slice(0, 500), endedAt: now, heldCode: null });
     await releaseLocks(uow.sql, run.id);
+    // PLA-I67-6: a trial that never started says why (the plan guard, a paused project, its copy could not be made).
+    const trialId = trialIdOfRun(run);
+    if (trialId) await setTrial(uow.sql, trialId, { status: trialStatusOf(status), summary, finishedAt: now });
     await uow.insert("heartbeatRuns", {
       agentId: run.agentId,
       startedAt: run.queuedAt,
@@ -803,10 +929,33 @@ async function endWithoutProcess(db: Q, run: AgentRun, status: "skipped" | "fail
 
 // ---- Start
 
+// PLA-71: the owner's request for changes (thread-actions changes) that is newer than the ticket's last move to In
+// review: the request this run has to answer. Null when the ticket was not sent back since it was last delivered.
+// PLA-I2-10: the request is the note's owner_changes field. LEGACY_CHANGES_LIKE / LEGACY_CHANGES_PREFIX read notes
+// written before that field existed (Spanish only); they are the one documented fallback (test/i2-10-server.test.ts).
+export const LEGACY_CHANGES_LIKE = "Cambios que pide %";
+export const LEGACY_CHANGES_PREFIX = /^Cambios que pide [^:\n]{1,80}:\s*/;
+export async function ownerChangesOf(db: Db, projectId: string, taskKey: string): Promise<string | null> {
+  const events = await readerOf(db).find("events", { projectId, taskKey });
+  // The ticket's last move to In review (none: 0).
+  const since = events.filter((e) => e.type === "task.status" && e.payload?.to === ST.inReview).reduce((a, e) => Math.max(a, e.id), 0);
+  // payload->>'x': a string as it is, any other JSON value as its text, a JSON null as none.
+  const textOf = (v: unknown): string | null => (v == null ? null : typeof v === "string" ? v : JSON.stringify(v));
+  const legacy = (text: string | null) => !!text && text.startsWith(LEGACY_CHANGES_LIKE.slice(0, -1));
+  const row = events
+    .filter((e) => e.type === "note" && e.id > since && (Object.hasOwn(e.payload ?? {}, "owner_changes") || legacy(textOf(e.payload?.text))))
+    .sort((a, b) => b.id - a.id)[0];
+  const changes = textOf(row?.payload?.owner_changes);
+  const note = textOf(row?.payload?.text);
+  const text = changes ?? (note ? note.replace(LEGACY_CHANGES_PREFIX, "") : null);
+  return text ? text.trim().slice(0, 1500) || null : null;
+}
+
 export function userPrompt(input: {
   agent: string;
   role: string;
-  project: { slug: string; title: string };
+  // PLA-I2-5: startBranch is settings.start_branch through startBranchOf; absent reads as the default.
+  project: { slug: string; title: string; startBranch?: string };
   goal: { title: string; why: string } | null;
   task: { key: string; title: string } | null;
   workspace: { path: string; branch: string | null } | null;
@@ -814,10 +963,23 @@ export function userPrompt(input: {
   reason?: string | null;
   // PLA-I46-12: the skill packs this role carries, their one line and where the body was written.
   packs?: { name: string; when: string; file: string }[];
-  // PLA-I54-2: absolute paths of the pictures Jorge attached to the request (src/pedidos/images.ts).
+  // PLA-I54-2: absolute paths of the pictures the owner attached to the request (src/pedidos/images.ts).
   images?: string[];
+  // AUDIT-3: the same packs delivered as a plugin outside the worktree (src/runner/kit.ts).
+  kit?: KitWritten[];
+  // AUDIT-1: the project's checks (settings.qa.verify), named so the builder runs them before it delivers.
+  verify?: { name: string; command: string }[];
+  // AUDIT-7: a fresh session on work that was already started, and why.
+  handoff?: string | null;
+  // PLA-71: what the owner asked to change when he sent this delivery back (his words), newest first.
+  changes?: string | null;
+  // PLA-I67-4: the seat's references, copied into the run's temp folder (src/runner/references.ts).
+  references?: ReferenceLine[];
+  // PLA-I73-2: the delivered step this one is stacked on (its branch is this worktree's starting point).
+  stackedOn?: { key: string; title: string; branch: string } | null;
 }): string {
   const company = input.role === "asistente";
+  const startBranch = input.project.startBranch ?? DEFAULT_START_BRANCH;
   const lines = [
     company
       ? `You are ${input.agent} (asistente), the company's chief of staff, woken by the Plania runner. Your runs are recorded in project ${input.project.slug}.`
@@ -827,43 +989,128 @@ export function userPrompt(input: {
   ];
   if (company) lines.splice(1, 2, input.task ? `Ticket: ${input.task.key}: ${input.task.title}` : "Ticket: none. Read the company thread (thread_read company) first.");
   if (input.reason) lines.push(`Why you woke: ${input.reason}.`);
-  // PLA-I32-3/5: the conversation is where Jorge reads you.
+  // PLA-71: a delivery the owner sent back. Without this line a fresh session saw only «ticket ready», took the work
+  // for unfinished, re-ran the checks and delivered the same thing again.
+  if (input.changes)
+    lines.push(
+      `The owner sent your last delivery of this ticket back. Their words: «${input.changes}». Do exactly that before you call finish again; re-running the checks alone does not answer them. If what they ask is in your muestra (the views Plania shows them), fix the muestra.`,
+    );
+  // PLA-I32-3/5: the conversation is where the owner reads you.
   lines.push(
     company
-      ? "Answer Jorge in the company thread with thread_post (thread company); write in a project's thread when it is about that project. Never merge anything."
+      ? "Answer the owner in the company thread with thread_post (thread company); write in a project's thread when it is about that project. Never merge anything."
       : `End the run with one line in your project's thread (thread_post, thread ${input.project.slug}): what you did, with a link to it, and what you need.`,
+    languageLine(),
   );
   if (input.workspace) {
-    lines.push(`Workspace: ${input.workspace.path}${input.workspace.branch ? ` on branch ${input.workspace.branch}` : ""}, base sandbox.`);
+    lines.push(`Workspace: ${input.workspace.path}${input.workspace.branch ? ` on branch ${input.workspace.branch}` : ""}, base ${startBranch}.`);
+  }
+  if (input.stackedOn) {
+    const b = input.stackedOn;
+    lines.push(
+      `This step is stacked on ${b.key} «${b.title}», delivered and still in review: your branch starts from ${b.branch}, so its code is already here. Build on it, do not redo it. Your PR still goes into ${startBranch}; until ${b.key} merges it also shows that step's commits, which is expected. If ${b.key} is sent back and changes, rebase onto origin/${b.branch} before you deliver.`,
+    );
   }
   lines.push(...packLines(input.packs ?? []));
-  if (input.images?.length) {
-    lines.push("Pictures Jorge attached to this request (open each one with the Read tool before you answer):", ...input.images.map((p) => `- ${p}`));
+  lines.push(...kitLines(input.kit ?? []));
+  if (input.handoff) {
+    lines.push(
+      `This is a fresh session on work that was already started (${input.handoff}). Before you change anything: read the ticket and its notes (start returns them), then run git status and git log --oneline origin/sandbox..HEAD in the workspace to see what exists. Continue from there; do not start over.`,
+    );
   }
+  if (input.verify?.length && input.task && !/-IDEA\d+$/.test(input.task.key)) {
+    lines.push(
+      "Checks Plania runs on your delivery. Run them in the workspace and fix what fails before you call finish; finish runs them again and refuses a delivery that fails one:",
+      ...input.verify.map((v) => `- ${v.name}: \`${v.command}\``),
+    );
+  }
+  if (input.images?.length) {
+    lines.push("Pictures the owner attached to this request (open each one with the Read tool before you answer):", ...input.images.map((p) => `- ${p}`));
+  }
+  lines.push(...referenceLines(input.references ?? []));
   // PLA-I49-6: an idea (PREFIX-IDEA<n>) is not a ticket and start refuses it. Research and Artist woken on an idea's
   // stage work on the idea itself: read it, write the stage doc on it, move its stage.
   const idea = !!input.task && /-IDEA\d+$/.test(input.task.key);
   lines.push(
     idea
-      ? `This is an idea, not a ticket: do not call start or claim on it. Read it with get_task, write your stage doc on it with attach_doc (key ${input.task!.key}), then move its stage with set_task.`
+      ? `This is an idea, not a ticket: do not call start or claim on it. Read it with get_task, deliver your stage with deliver_stage (key ${input.task!.key}; it checks the content and writes the stage doc), then move its stage with set_task.`
       : `Plania first: open the ticket with start (actor session_id ${input.sessionId}, that workspace) before you touch code.`,
-    "Never main: commit on your branch, open PRs into sandbox only, never merge. Stop when the ticket is In review or when only Jorge can decide (ask).",
+    `Never main: commit on your branch, open PRs into ${startBranch} only, never merge. Stop when the ticket is In review or when only the owner can decide (ask).`,
   );
   // PLA-I61-2 (La idea abierta): the owner sees the design on the screen only through its frames in Plania.
   if (idea && input.role === "artist") {
     lines.push(
-      `Draw the canvas under ${canvasesRoot()}/${input.task!.key}/, export one PNG per frame, and put them on the idea with attach_frames (key ${input.task!.key}): each frame's id (T, A1, B3), name, group, what it does (hace) and why (porque), in order. Jorge sees the design only through those frames, then writes the Design doc with attach_doc as usual.`,
+      `Draw the canvas under ${canvasesRoot()}/${input.task!.key}/, export one PNG per frame, and put them on the idea with attach_frames (key ${input.task!.key}): each frame's id (T, A1, B3), name, group, what it does (hace) and why (porque), in order. The owner sees the design only through those frames, then deliver the Design stage with deliver_stage as usual.`,
     );
   }
-  return lines.join("\n");
+  return personalize(lines.join("\n")); // PLA-I2-14: "the owner" reads as the display name
 }
 
-async function promptDoc(db: Db, role: RunnerRole, env: NodeJS.ProcessEnv): Promise<string | null> {
-  const slug = env.PLANIA_PROMPTS_PROJECT || "plania";
+// AUDIT-2: the role prompt and its version, "<doc version>:<first 12 of its sha256>". The Plania doc is the live copy;
+// with no doc the repo's kit/roles/<role>.md is used and the version reads "git:<sha>".
+export async function promptDoc(db: Db, role: RunnerRole, env: NodeJS.ProcessEnv): Promise<{ markdown: string; version: string } | null> {
+  // NEWPROJ-2: the lookup is shared with project creation and the hire sheet (src/runner/prompts.ts).
+  const prompt = await rolePrompt(db, role, env);
+  return prompt ? { markdown: prompt.markdown, version: prompt.version } : null;
+}
+
+// AUDIT-9: what the owner keeps about a project that cannot be found by reading its repo: three project docs,
+// appended to the role prompt on a session's first run. Cut at CONTEXT_MAX_LINES so it stays a map.
+export const CONTEXT_DOCS = ["Context: Glossary", "Context: Commands", "Context: Map"] as const;
+export const CONTEXT_MAX_LINES = 200;
+export async function projectContext(db: Db, projectId: string): Promise<string | null> {
+  const rows = (await readerOf(db).find("docs", { projectId, taskId: null, title: [...CONTEXT_DOCS] })).map((d) => ({ title: d.title, markdown: d.markdown }));
+  const parts = CONTEXT_DOCS.map((title) => rows.find((r) => r.title === title))
+    .filter((r): r is { title: string; markdown: string } => !!r && !!r.markdown.trim())
+    .map((r) => `## ${r.title.replace(/^Context:\s*/, "")}\n\n${r.markdown.trim()}`);
+  if (parts.length === 0) return null;
+  const lines = parts.join("\n\n").split("\n");
+  const body = lines.length > CONTEXT_MAX_LINES ? [...lines.slice(0, CONTEXT_MAX_LINES), `(cut at ${CONTEXT_MAX_LINES} lines)`] : lines;
+  return `# Project context\n\nKept by the owner in Plania. It holds only what reading the repo does not tell you.\n\n${body.join("\n")}`;
+}
+
+// PLA-147: the owner's pinned rules ride with every role prompt. Idea-stage runs (Research, Artist) never call
+// start, so before this a pinned «everything local» never reached Research, which recommended a hosted store.
+// Live only: retired and superseded decisions are left out. Newest first, capped so the prompt stays short.
+export const PINNED_MAX = 25;
+export async function pinnedDecisionsBlock(db: Db, projectId: string): Promise<string | null> {
   const r = readerOf(db);
-  const p = await r.get("projects", { slug });
-  const doc = p ? await r.get("docs", { projectId: p.id, taskId: null, title: PROMPT_DOCS[role] }) : undefined;
-  return doc?.markdown ?? null;
+  const pinned = await r.find("decisions", { projectId, pinned: true, retiredAt: null }, { orderBy: [{ column: "createdAt", desc: true }] });
+  const superseded = new Set(pinned.length ? (await r.find("decisionSupersessions", { supersedesId: pinned.map((d) => d.id) })).map((s) => s.supersedesId) : []);
+  const rows = { rows: pinned.filter((d) => !superseded.has(d.id)).slice(0, PINNED_MAX) };
+  if (rows.rows.length === 0) return null;
+  return [
+    "# Pinned decisions",
+    "",
+    "The owner's standing rules for this project. Follow them. An option that breaks one is flagged as breaking it and is never your recommendation; if one blocks the work, ask the owner.",
+    "",
+    ...rows.rows.map((r) => `- ${r.line.replace(/\s+/g, " ").trim()}`),
+  ].join("\n");
+}
+
+// AUDIT-7: resume the session, or start clean with a handoff? A session that failed, whose delivery QA sent back, or
+// that grew past PLANIA_RESUME_MAX_CONTEXT tokens carries its dead ends; a fresh one reads the ticket and git instead.
+// PLANIA_RETRY_FRESH: "1" (default) fresh in those cases, "0" always resume, "ab" fresh for every other such run, so
+// agent_runs.resumed splits them evenly and the scoreboard can compare both.
+export async function freshReason(db: Db, run: AgentRun, env: NodeJS.ProcessEnv): Promise<string | null> {
+  const mode = env.PLANIA_RETRY_FRESH ?? "1";
+  if (mode === "0") return null;
+  const r = readerOf(db);
+  // The newest finished run on this work: by when it ended (or was queued, if it never did).
+  const at = (x: AgentRun) => (x.endedAt ?? x.queuedAt).getTime();
+  const [last] = (await r.find("agentRuns", { agentId: run.agentId, projectId: run.projectId, workKey: run.workKey, status: ["ok", "fail", "stopped"] })).sort((a, b) => at(b) - at(a));
+  const prior = last ? { status: last.status, context: last.contextTokens } : undefined;
+  const max = Number(env.PLANIA_RESUME_MAX_CONTEXT) > 0 ? Number(env.PLANIA_RESUME_MAX_CONTEXT) : 120_000;
+  let why: string | null = null;
+  if (prior?.status === "fail") why = "the last run on it failed";
+  else if (prior?.context != null && prior.context > max) why = "the earlier session grew too long";
+  if (!why && run.taskKey) {
+    const [lane] = await r.find("qaLanes", { projectId: run.projectId, taskKey: run.taskKey }, { orderBy: [{ column: "createdAt", desc: true }], limit: 1 });
+    if (lane?.returned) why = "QA sent the delivery back";
+  }
+  if (!why) return null;
+  if (mode === "ab" && parseInt(run.id.replace(/-/g, "").slice(-2), 16) % 2 === 1) return null;
+  return why;
 }
 
 export type ClaudeArgsInput = {
@@ -876,6 +1123,20 @@ export type ClaudeArgsInput = {
   // PLA-I46-9: a QA review of a small change runs on a smaller model. PLA-I59-1: every run's motor (motor.ts).
   model?: string | null;
   effort?: string | null;
+  // AUDIT-3: the run's kit (a plugin folder in its temp dir); also granted for reading, so a run can open a skill's file.
+  pluginDir?: string | null;
+  // PLA-I67-4: more folders the run may read (its references).
+  addDirs?: string[];
+  // AUDIT-3 (PLANIA_RUN_ISOLATION): "project" loads no user-level settings, skills or CLAUDE.md of the account the
+  // server runs as; "bare" skips every auto-discovery. Unset: as before, the CLI's defaults.
+  isolation?: string | null;
+  // AUDIT-6: a JSON Schema the run's final answer must match (the QA report).
+  jsonSchema?: unknown;
+};
+
+export const isolationOf = (env: NodeJS.ProcessEnv): "project" | "bare" | null => {
+  const v = env.PLANIA_RUN_ISOLATION?.trim().toLowerCase();
+  return v === "project" || v === "bare" ? v : null;
 };
 
 export function claudeArgs(input: ClaudeArgsInput): string[] {
@@ -902,13 +1163,40 @@ export function claudeArgs(input: ClaudeArgsInput): string[] {
   if (input.resume) args.push("--resume", input.resume);
   if (input.model) args.push("--model", input.model);
   if (input.effort) args.push("--effort", input.effort);
+  if (input.pluginDir) args.push("--plugin-dir", input.pluginDir, "--add-dir", input.pluginDir);
+  for (const dir of input.addDirs ?? []) args.push("--add-dir", dir);
+  if (input.isolation === "project") args.push("--setting-sources", "project,local");
+  if (input.isolation === "bare") args.push("--bare");
+  if (input.jsonSchema) args.push("--json-schema", JSON.stringify(input.jsonSchema));
   return args;
 }
 
 // Plania only. The token stays in the child env; the file names the variable, never the value.
-export const mcpConfig = (url: string) => ({
-  mcpServers: { plania: { type: "http", url, headers: { Authorization: "Bearer ${PLANIA_RUNNER_TOKEN}" } } },
+// AUDIT-6: browser adds a second server for a QA run that walks through the app (settings.qa.browser).
+export type McpStdio = { command: string; args: string[] };
+// timeout: finish may run the project's checks before it answers (AUDIT-1) and sends nothing while it does. Claude Code
+// drops an HTTP tool call that is silent for five minutes whatever MCP_TOOL_TIMEOUT says, and the server would go on
+// and commit a delivery the run was told had failed. The per-server timeout lifts that for Plania alone.
+// PLA-82 (F-12): X-Plania-Run names the run, so its writes are its roster agent's even when it invents a session_id.
+export const PLANIA_TOOL_TIMEOUT_MS = 30 * 60_000;
+export const mcpConfig = (url: string, browser: McpStdio | null = null, run: string | null = null) => ({
+  mcpServers: {
+    plania: {
+      type: "http",
+      url,
+      headers: { Authorization: "Bearer ${PLANIA_RUNNER_TOKEN}", ...(run ? { "X-Plania-Run": run } : {}) },
+      timeout: PLANIA_TOOL_TIMEOUT_MS,
+    },
+    ...(browser ? { browser } : {}),
+  },
 });
+
+// The browser tools a QA walk-through uses: Playwright's MCP server, headless, with a profile it throws away.
+// PLANIA_BROWSER_MCP replaces the command (the first word is the program, the rest its arguments).
+export function browserServer(env: NodeJS.ProcessEnv): McpStdio {
+  const words = (env.PLANIA_BROWSER_MCP?.trim() || "npx -y @playwright/mcp@latest --headless --isolated").split(/\s+/);
+  return { command: words[0]!, args: words.slice(1) };
+}
 
 // The stream's running totals reach agent_runs every few seconds while the run is live.
 function liveFlusher(db: Db, run: Pick<AgentRun, "id" | "projectId">, reader: StreamReader, every: number): (chunk: string) => void {
@@ -936,26 +1224,48 @@ async function start(db: Db, run: AgentRun, ctx: WakeContext, deps: RunnerDeps):
   const taskKey = run.taskKey;
   const fail = async (summary: string): Promise<WakeOutcome> => {
     await endWithoutProcess(db, run, "fail", summary, new Date());
+    // NEWPROJ-5: a run that never started writes no event, so open screens kept showing the step as about to
+    // start until their next poll. Tell them now.
+    bus.publish({ type: "task", project: project.slug, ...(taskKey ? { key: taskKey } : {}) });
     return { kind: "fail", summary, taskKey, recorded: true };
   };
 
-  const token = env.PLANIA_RUNNER_TOKEN?.trim();
+  // PLA-I2-2: .env first, else the token first start stored.
+  const token = storedRunnerToken(env);
   if (!token) return fail("fail: missing env PLANIA_RUNNER_TOKEN");
   const settings = await loadSettings(db);
   const root = rootOf(deps, env);
   // PLA-I57-1: a question from Preguntar. Read-only, in the project's own checkout, fresh session, no packs.
   const consultaId = consultaIdOfRun(run);
   const consulta = consultaId ? await consultaById(db, consultaId) : null;
+  // PLA-I67-6: a skill trial, in its own throwaway copy (src/runner/trial.ts).
+  const trialId = trialIdOfRun(run);
+  const trial = trialId ? await trialById(db, trialId) : null;
+  if (trialId && !trial) return fail("fail: no such trial");
 
   // Where the run works: the ticket's worktree, or a scratch folder for a PO with no ticket.
   let cwd: string;
   let worktree: string | null = null;
+  let stacked: StackBase | null = null;
   let branch: string | null = null;
-  if (ctx.task) {
+  let readCopy: { branch: string | null; commit: string | null; fallback?: string } | null = null;
+  if (trial) {
     const repo = repoPathOf(project.slug, project.settings, env);
-    const wanted = ctx.taskRow?.branch?.trim() || branchFor(ctx.task.key);
+    const target = trialPathFor(root, project.slug, trial.id);
+    const made = await withRepoLock(db, repo, () => addTrialCopy({ repo, target, base: trial.baseCommit ?? "" }, carefulGit(deps.git ?? defaultGit)));
+    if (!made.ok) return fail(made.summary);
+    cwd = target;
+    worktree = target;
+  } else if (ctx.task) {
+    const repo = repoPathOf(project.slug, project.settings, env);
+    const wanted = ctx.taskRow?.branch?.trim() || branchFor(ctx.task.key, await workPatternOf(db, project.id));
     // PLA-I60-2: one git writer per repo (withRepoLock), with lock errors retried.
-    const made = await withRepoLock(db, repo, () => ensureWorktree({ repo, root, project: project.slug, key: ctx.task!.key, branch: wanted }, carefulGit(deps.git ?? defaultGit)));
+    // PLA-I73-2: a step stacked on a delivered one starts from that step's branch.
+    stacked = ctx.taskRow?.id ? await stackBaseOf(db, ctx.taskRow.id) : null;
+    // PLA-I73-6: step 1 starts from the skeleton built early on the idea's branch.
+    const early = !stacked && ctx.taskRow?.id ? await earlyBaseOf(db, ctx.taskRow.id) : null;
+    const from = stacked?.branch ?? early?.branch;
+    const made = await withRepoLock(db, repo, () => ensureWorktree({ repo, root, project: project.slug, key: ctx.task!.key, branch: wanted, base: startBranchOf(project.settings), ...(from ? { from } : {}) }, carefulGit(deps.git ?? defaultGit)));
     if (!made.ok) {
       if (made.summary === "fail: no repo" && role !== "taller") {
         cwd = scratchPathFor(root, project.slug, ctx.agent.slug);
@@ -965,6 +1275,8 @@ async function start(db: Db, run: AgentRun, ctx: WakeContext, deps: RunnerDeps):
       cwd = made.path;
       worktree = made.path;
       branch = made.branch;
+      // PLA-I73-4: a new worktree gets the checkout's modules as an instant clone when the lockfile matches.
+      if (made.created) await cloneModules(repo, made.path).catch(() => false);
       if (made.created && deps.footprints !== false) {
         await registerFootprint(
           db,
@@ -981,7 +1293,23 @@ async function start(db: Db, run: AgentRun, ctx: WakeContext, deps: RunnerDeps):
       }
     }
   } else if (consulta && existsSync(repoPathOf(project.slug, project.settings, env))) {
-    cwd = repoPathOf(project.slug, project.settings, env);
+    // PLA-66: a fresh read-only copy at origin/sandbox; the owner's checkout only if that copy cannot be made.
+    const repo = repoPathOf(project.slug, project.settings, env);
+    const copy = await withRepoLock(db, repo, () => ensureReadCopy({ repo, root, project: project.slug, base: startBranchOf(project.settings) }, carefulGit(deps.git ?? defaultGit)));
+    if (copy.ok) {
+      cwd = copy.path;
+      readCopy = { branch: copy.branch, commit: copy.commit };
+      if (copy.created && deps.footprints !== false) {
+        await registerFootprint(
+          db,
+          { project: project.slug, kind: "worktree", locator: copy.path, purpose: `Read copy for Preguntar (${project.slug}), moved to origin/sandbox before each question`, teardown: `git -C ${repo} worktree remove --force ${copy.path}` },
+          { ...sysCtx("runner.worktree"), actor: { ...sysCtx("runner.worktree").actor, session_id: `runner-${ctx.agent.slug}` } },
+        ).catch(() => undefined);
+      }
+    } else {
+      cwd = repo;
+      readCopy = { branch: null, commit: null, fallback: copy.summary };
+    }
   } else {
     cwd = scratchPathFor(root, project.slug, ctx.agent.slug);
     mkdirSync(cwd, { recursive: true });
@@ -991,19 +1319,38 @@ async function start(db: Db, run: AgentRun, ctx: WakeContext, deps: RunnerDeps):
   const session = await readerOf(db).get("agentSessions", { agentId: ctx.agent.id, projectId: project.id, workKey: run.workKey });
   // PLA-I46-9: a QA run is always a fresh session, so its review has not seen anyone's earlier reasoning.
   const qa = role === "qa" ? await qaBriefFor(db, run.id, cwd) : null;
-  const resume = !qa && !consulta && session && session.cwd === cwd ? session.claudeSessionId : null;
+  const resumable = !qa && !consulta && !trial && session && session.cwd === cwd ? session.claudeSessionId : null;
+  // AUDIT-7: a session that failed, was sent back or grew long is not resumed; the run starts clean with a handoff.
+  const handoff = resumable ? await freshReason(db, run, env).catch(() => null) : null;
+  const resume = handoff ? null : resumable;
 
   const tmp = path.join(tmpDirOf(deps), run.id);
   mkdirSync(tmp, { recursive: true, mode: 0o700 });
   let systemPromptPath: string | null = null;
+  let promptVersion: string | null = null;
+  let mannerStamp: string | null = null;
   if (!resume) {
-    const markdown = await promptDoc(db, role, env);
-    if (!markdown) {
+    const doc = await promptDoc(db, role, env);
+    if (!doc) {
       rmSync(tmp, { recursive: true, force: true });
       return fail(`fail: no prompt doc (${PROMPT_DOCS[role]})`);
     }
+    promptVersion = doc.version;
+    // AUDIT-9: the project's own context rides with the role prompt (not for the company's Asistente or a QA review,
+    // which judges the change on its own).
+    const own = role === "asistente" || qa ? null : await projectContext(db, project.id).catch(() => null);
+    const pinned = role === "asistente" || qa ? null : await pinnedDecisionsBlock(db, project.id).catch(() => null);
+    const base = own && pinned ? `${own}\n\n${pinned}` : (own ?? pinned);
+    // PLA-I68-4: the commit rules chosen in Camino, the text the page shows, for the builder.
+    const commitsText = role === "taller" ? await commitInstructions(db, project).catch(() => null) : null;
+    const context = base && commitsText ? `${base}\n\n${commitsText}` : (base ?? (commitsText ? `# Project context\n\n${commitsText}` : null));
     systemPromptPath = path.join(tmp, "role-prompt.md");
-    writeFileSync(systemPromptPath, markdown, { mode: 0o600 });
+    // PLA-I67-2: «tu manera», the owner's text for this agent, after the role prompt and the context (not for QA or
+    // a question from Preguntar, which run on the role alone).
+    const manner = qa || consulta ? null : mannerBlock(ctx.agent.manner);
+    if (manner) mannerStamp = mannerVersion(ctx.agent.manner);
+    const parts = [doc.markdown.trimEnd(), context, manner].filter((x): x is string => !!x);
+    writeFileSync(systemPromptPath, parts.length > 1 ? `${parts.join("\n\n")}\n` : doc.markdown, { mode: 0o600 });
   }
   const settingsPath = path.join(tmp, "settings.json");
   // PLA-I52-6: a run that answers the owner's question about a delivery reads only, like QA.
@@ -1012,37 +1359,103 @@ async function start(db: Db, run: AgentRun, ctx: WakeContext, deps: RunnerDeps):
     const h = await (deps.git ?? defaultGit)(["rev-parse", "HEAD"], cwd).catch(() => null);
     askHeads.set(run.id, h && h.code === 0 ? h.stdout.trim() : null);
   }
-  writeFileSync(settingsPath, JSON.stringify(denySettings(consulta ? CONSULTA_DENY_RULES : role === "qa" || asks ? QA_DENY_RULES : [])), { mode: 0o600 });
+  // PLA-I66-5: Artist drawing logo marks reads only (its scratch folder) and answers with deliver_marks.
+  const marksReq = !consulta && !trial && role === "artist" && !ctx.task ? marksRequestOfRun(project.slug, run.reason) : null;
+  const readOnly = !!consulta || role === "qa" || asks || !!marksReq;
+  // AUDIT-1: a builder's run formats or type-checks after each edit when the project names a command for it.
+  const editHooks = !readOnly && role === "taller" ? afterEditHooks(project.settings?.qa?.after_edit) : undefined;
+  // PLA-I68-4: Camino's commit rules, checked before a builder's run pushes or opens a PR (and after each commit when
+  // the owner asked); only once the owner chose them in Camino.
+  const commitHook = !readOnly && role === "taller" ? await commitHooks(db, project, tmp, startBranchOf(project.settings)).catch(() => null) : null;
+  const hooks =
+    editHooks || commitHook
+      ? { ...(commitHook?.PreToolUse ? { PreToolUse: commitHook.PreToolUse } : {}), ...(editHooks?.PostToolUse || commitHook?.PostToolUse ? { PostToolUse: [...(editHooks?.PostToolUse ?? []), ...(commitHook?.PostToolUse ?? [])] } : {}) }
+      : undefined;
+  // PLA-I2-9: a run of Plania itself also may not reach the live database or apply a migration. On this branch the live
+  // data is a devva store: the rules name the live store's prefix and the engine's token file.
+  const self = isSelfProject(repoPathOf(project.slug, project.settings, env), deps.serverRoot ?? serverRoot());
+  const laneRules = consulta ? CONSULTA_DENY_RULES : trial ? TRIAL_DENY_RULES : marksReq ? QA_DENY_RULES : role === "qa" || asks ? QA_DENY_RULES : [];
+  writeFileSync(settingsPath, JSON.stringify({ ...denySettings(self ? [...laneRules, ...selfRules(liveStorePrefix(env), env.DEVVA_TOKEN_FILE)] : laneRules), ...(hooks ? { hooks } : {}) }), { mode: 0o600 });
   const mcpConfigPath = path.join(tmp, "mcp.json");
-  writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig(env.PLANIA_MCP_URL || "http://127.0.0.1:3737/mcp")), { mode: 0o600 });
+  // PLA-I67-6: a trial reaches no Plania server at all, so it cannot write to the delivery's ticket.
+  writeFileSync(mcpConfigPath, JSON.stringify(trial ? { mcpServers: {} } : mcpConfig(env.PLANIA_MCP_URL || "http://127.0.0.1:3737/mcp", qa?.browser ? browserServer(env) : null, runSession(run.id))), { mode: 0o600 });
 
   // PLA-I46-12: only this role's packs, written fresh (whatever an earlier run left is cleared first).
-  const packs = consulta ? [] : writePacks(cwd, await packsOf(db, ctx.agent, env));
+  // AUDIT-3: by default they go in a plugin in the run's temp folder, loaded with --plugin-dir, and the worktree is
+  // left alone (whatever an older run left there is cleared). PLANIA_KIT_MODE=worktree keeps the older delivery.
+  // PLA-I67-2: the factory kit merged with the owner's skills in scope (src/runner/skills.ts).
+  const carried = consulta ? [] : trial ? await trialKit(db, ctx.agent, trial, env, role) : await resolvedKit(db, ctx.agent, env, role);
+  const inWorktree = env.PLANIA_KIT_MODE === "worktree";
+  const packs = inWorktree ? writePacks(cwd, carried) : [];
+  if (!inWorktree && !consulta) clearPacks(cwd);
+  const kitDir = path.join(tmp, "kit");
+  const kit = inWorktree ? [] : writeKitPlugin(kitDir, carried);
+  // AUDIT-1: the builder is told the checks its delivery will meet.
+  const verify = role === "taller" && ctx.task ? (project.settings?.qa?.verify ?? []).map((v) => ({ name: v.name, command: v.command })) : [];
+
+  // PLA-I67-4: the seat's references, copied into this run's temp folder and recorded as carried. Not for a question
+  // (Preguntar) or a QA review, which judge on their own.
+  const refsDir = path.join(tmp, "refs");
+  const references = consulta || qa || trial ? [] : await carryReferences(db, { projectId: project.id, agentId: ctx.agent.id, runId: run.id, dir: refsDir }).catch(() => [] as ReferenceLine[]);
 
   const goal = await projectGoal(db, project.id);
   const planiaSession = runSession(run.id);
-  const prompt = consulta
-    ? consultaPrompt({ agent: ctx.agent.name, project: { slug: project.slug, title: project.title }, consulta, cwd, sessionId: planiaSession })
-    : qa?.prompt ?? userPrompt({
+  const prompt = trial
+    ? trialPrompt({ agent: ctx.agent.name, role, project: { slug: project.slug, title: project.title }, trial, scope: await trialScope(db, trial.projectId, trial.taskKey).catch(() => null), cwd, kit })
+    : consulta
+    ? consultaPrompt({ agent: ctx.agent.name, project: { slug: project.slug, title: project.title }, consulta, cwd, sessionId: planiaSession, copy: readCopy })
+    : marksReq
+      ? marksPrompt({ agent: ctx.agent.name, project: { slug: project.slug, title: project.title }, request: marksReq, sessionId: planiaSession, imageDir: uploadDir(project.slug) })
+      : qa?.prompt ?? userPrompt({
     agent: ctx.agent.name,
     role,
-    project: { slug: project.slug, title: project.title },
+    project: { slug: project.slug, title: project.title, startBranch: startBranchOf(project.settings) },
     goal,
     task: ctx.task ? { key: ctx.task.key, title: ctx.task.title } : null,
     workspace: { path: cwd, branch },
+    stackedOn: stacked,
     sessionId: planiaSession,
     reason: run.reason?.trim() || null,
     packs,
+    kit,
+    verify,
+    handoff,
+    changes: ctx.task ? await ownerChangesOf(db, project.id, ctx.task.key).catch(() => null) : null,
     images: ctx.task ? await taskImagePaths(db, project.id, ctx.task.key).catch(() => []) : [],
+    references,
   });
+  // PLA-I67-3: the owner's approved lessons ride in the prompt, bounded (not for QA, a question, or a delivery question).
+  // PLA-I67-5: within what the always-on budget leaves after the role prompt, «tu manera» and the skill list.
+  const carriedLessons = consulta || qa || asks ? [] : await lessonsForRun(db, ctx.agent, lessonRoomOf(await fixedWords(db, ctx.agent, carried, env))).catch(() => []);
+  const lessonText = lessonBlock(carriedLessons);
+  // PLA-I69-5, PLA-130: how the app addresses people (Marca → Estilo → Trato) rides in every run that writes for it.
+  const voiceText = consulta || qa ? "" : voiceBlock(project.slug);
   // PLA-I59-1: the motor this run asks for (QA lane > the seat, or its Preguntar values > the company > none).
+  // PLA-I73-6: a Taller step's own effort from the plan.
+  const stepRow = role === "taller" && ctx.taskRow?.id ? ((await readerOf(db).get("tasks", { id: ctx.taskRow.id })) ?? null) : null;
+  const stepEffort = stepRow ? ((await planStepFor(db, stepRow).catch(() => null))?.effort ?? null) : null;
   const motor = resolveMotor({
+    stepEffort,
     qaModel: qa?.model ?? null,
     consulta: !!consulta,
     seat: { model: ctx.agent.motorModel, effort: ctx.agent.motorEffort, consultaModel: ctx.agent.consultaModel, consultaEffort: ctx.agent.consultaEffort },
     company: { model: settings.defaultModel, effort: settings.defaultEffort },
   });
-  const args = claudeArgs({ prompt, settingsPath, mcpConfigPath, systemPromptPath, maxTurns: consulta ? Math.min(settings.maxTurns, 40) : settings.maxTurns, resume, model: motor.model, effort: motor.effort });
+  const args = claudeArgs({
+    prompt: [prompt, lessonText, voiceText].filter(Boolean).join("\n\n"),
+    settingsPath,
+    mcpConfigPath,
+    systemPromptPath,
+    maxTurns: consulta ? Math.min(settings.maxTurns, 40) : settings.maxTurns,
+    resume,
+    model: motor.model,
+    effort: motor.effort,
+    pluginDir: kit.length ? kitDir : null,
+    addDirs: references.some((r) => r.path) ? [refsDir] : [],
+    isolation: isolationOf(env),
+    // AUDIT-6: the QA report comes back as validated JSON (the fenced block in its brief stays as the fallback).
+    jsonSchema: qa?.jsonSchema ?? null,
+  });
   const command = claudeCommand(ctx.agent.adapterConfig, env);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const logPath = path.join(logDirOf(deps, env), `${stamp}-${ctx.agent.slug}-${run.id.slice(0, 8)}.jsonl`);
@@ -1056,11 +1469,28 @@ async function start(db: Db, run: AgentRun, ctx: WakeContext, deps: RunnerDeps):
   const onStdout = liveFlusher(db, run, reader, deps.liveFlushMs ?? 5_000);
   // PLA-I60-3: the real runner starts the run through wrapper.mjs, detached, so it outlives a server restart. Tests
   // that inject spawn keep the piped child.
+  // AUDIT-1: finish may run the project's checks before it answers, so a Plania tool call may take minutes.
+  // PLA-I2-13: an allow-list; the project's settings.runner.env names the extra variables its runs get.
+  // PLA-158 (F-31): a builder's run on a project whose copies have their own bases works on <db>_taller, never the
+  // app's database: the variable goes in the process environment, which wins over the app's env files.
+  let tallerEnv: Record<string, string> = {};
+  if (role === "taller" && run.lane === "work" && !trial && !readOnly) {
+    const made = await tallerDatabase(db, project);
+    if (made && !made.ok) return fail(`fail: no taller database (${made.error})`);
+    if (made) tallerEnv = made.env;
+  }
+  // PLA-I73-5: Taller's heavy commands take turns through the heavy-work queue.
+  const heavy = role === "taller" && run.lane === "work" && !trial && !readOnly ? heavyEnv(root, env) : {};
+  const runEnvValue = childEnv(env, { ...tallerEnv, ...heavy, PLANIA_RUNNER_TOKEN: token, ...(env.MCP_TOOL_TIMEOUT ? {} : { MCP_TOOL_TIMEOUT: String(30 * MINUTE) }) }, projectEnvNames(project.settings));
+  // PLA-I2-9: the check behind the deny rules: a run of Plania itself never starts pointed at the live database (here,
+  // the live store).
+  const selfProblem = self ? selfRunProblem(runEnvValue, cwd, env) : null;
+  if (selfProblem) return fail(`fail: ${selfProblem}`);
   const supervised = {
     command,
     args,
     cwd,
-    env: childEnv(env, { PLANIA_RUNNER_TOKEN: token }),
+    env: runEnvValue,
     logPath,
     timeoutMs: deps.timeoutMs ?? settings.timeoutMinutes * MINUTE,
     graceMs: deps.graceMs ?? 30_000,
@@ -1088,9 +1518,17 @@ async function start(db: Db, run: AgentRun, ctx: WakeContext, deps: RunnerDeps):
         startedAt,
         requestedModel: motor.model,
         requestedEffort: motor.effort,
+        // AUDIT-2: what this run was given (a resumed session keeps the prompt it started with, so none is named).
+        promptVersion,
+        skills: carried.map(skillVersion),
+        mannerVersion: mannerStamp,
       },
     ),
   );
+  // PLA-I67-3: one row per skill, lesson and manner version this run carried.
+  // PLA-I67-6: not for a trial, so the seat's counts read only real work.
+  if (!trial) await recordKnowledge(db, run.id, { skills: carried, manner: mannerStamp, lessons: carriedLessons }).catch(() => undefined);
+  else await setTrial(db, trial.id, { status: "running", summary: "running", afterSkills: carried.map(skillVersion) });
 
   const entry: LiveRun = { runId: run.id, agentId: ctx.agent.id, projectId: project.id, role, proc, finished: Promise.resolve(), stopReason: null };
   entry.finished = proc.done
@@ -1159,13 +1597,18 @@ export async function finishRun(db: Db, input: FinishInput, deps: RunnerDeps = {
       tokens.cacheCreate += m.cacheCreate;
     }
     // A result with turns but no modelUsage spent tokens nobody can count: unknown, which blocks.
-    usageKnown = result.hasModelUsage || result.numTurns === 0;
+    // PLA-I2-12: a signed-out Claude spent nothing; its missing usage must not block the next run.
+    const signedOut = isSignedOut(result);
+    usageKnown = result.hasModelUsage || result.numTurns === 0 || signedOut;
     if (!usageKnown) tokens = reader.liveTokens;
     turns = result.numTurns;
     const sid = result.sessionId ? `, session ${result.sessionId.slice(0, 8)}` : "";
     if (stopped) {
       status = "stopped";
       summary = `stopped: ${stopped} (${result.subtype}, ${turns} turns${sid})`;
+    } else if (signedOut) {
+      status = "fail";
+      summary = `fail: signed out (${turns} turns${sid})`;
     } else if (result.isError || result.subtype !== "success") {
       status = "fail";
       summary = `fail: ${result.subtype} (${turns} turns${sid})`;
@@ -1205,13 +1648,15 @@ export async function finishRun(db: Db, input: FinishInput, deps: RunnerDeps = {
 
   // PLA-I46-12: a skill pack never reaches the app repo. One in the branch diff (or staged) fails the run.
   const consultaRun = run.lane === "consulta";
-  const leaked = consultaRun ? [] : await packsInDiff(input.cwd, deps.git ?? defaultGit).catch(() => [] as string[]);
+  const leaked = consultaRun ? [] : await packsInDiff(input.cwd, deps.git ?? defaultGit, startBranchOf(project.settings)).catch(() => [] as string[]);
   if (leaked.length > 0) {
     status = "fail";
     summary = `fail: pack file in the diff (${leaked.slice(0, 3).join(", ")}${leaked.length > 3 ? ", …" : ""})`;
   }
 
   const sessionId = result?.sessionId ?? reader.sessionId;
+  // PLA-I67-6: a trial keeps no session and leaves nothing else behind (below).
+  const trialId = trialIdOfRun(run);
   // PLA-I60-6: the end and the lock release in one write (the load test saw a finished run holding keys); the
   // session and the heartbeat row go in that same write.
   const finished = await runWrite(db, run, async (uow) => {
@@ -1233,12 +1678,15 @@ export async function finishRun(db: Db, input: FinishInput, deps: RunnerDeps = {
         usageKnown,
         exitCode: exit.code,
         stopReason: input.stopReason,
+        // AUDIT-2 / AUDIT-7: the skills the stream showed it using, and how much context its last turn carried.
+        skillsUsed: [...reader.skillsUsed].sort().slice(0, 40),
+        contextTokens: reader.contextTokens,
       },
     );
     if (rows.length === 0) return rows;
     await releaseLocks(uow.sql, run.id);
     // PLA-I57-1: a question's run never replaces the PO's own session (it ran elsewhere, with a different prompt).
-    if (sessionId && !consultaRun) {
+    if (sessionId && !consultaRun && !trialId) {
       const key = { agentId: agent.id, projectId: project.id, workKey: run.workKey };
       const session = await uow.get("agentSessions", key);
       if (session) await uow.update("agentSessions", key, { claudeSessionId: sessionId, cwd: input.cwd, runs: session.runs + 1, updatedAt: uow.now });
@@ -1251,13 +1699,26 @@ export async function finishRun(db: Db, input: FinishInput, deps: RunnerDeps = {
       status: status === "stopped" ? "skipped" : status,
       adapter: RUNNER_ADAPTER,
       summary: summary.slice(0, 500),
-      taskKey: run.taskKey,
+      taskKey: trialId ? null : run.taskKey,
     });
     return rows;
   });
   if (finished.length === 0) return;
+  // PLA-I67-4: which of the references it carried the run opened.
+  await markOpened(db, run.id, reader.filesRead).catch(() => 0);
 
-  // PLA-I40-6: a PO that ends well with another request waiting gets one wake for it.
+  // PLA-I67-6: a trial keeps its answer and what it changed in its copy, then the copy goes. Nothing else follows.
+  if (trialId) {
+    const git = deps.git ?? defaultGit;
+    const diff = await trialResult(git, repoPathOf(project.slug, project.settings, deps.env ?? process.env), input.cwd).catch(() => null);
+    await setTrial(db, trialId, { status: trialStatusOf(status), summary, afterOutput: result?.resultText?.trim().slice(0, 6000) || null, afterDiff: diff, finishedAt: endedAt });
+    await notifyQueue(db);
+    return;
+  }
+  // PLA-155: a PO that wrote code on a «Hacerlo ya» ticket cannot commit it (its deny rules) and leaves it In progress.
+  if (roleOf(agent) === "product-owner" && run.taskKey && !consultaRun) await handPoCodeToTaller(db, project, run.taskKey, input.cwd, deps.git ?? defaultGit).catch(() => null);
+  // PLA-I40-6: a PO that ends well with another request waiting gets one wake for it. PLA-104: Taller too, for its
+  // oldest unblocked Ready ticket.
   if (status === "ok") await wakePoIfWaiting(db, agent, { id: project.id, slug: project.slug }, run.taskKey, deps.env ?? process.env).catch(() => null);
   // PLA-I60-1: wakes that arrived for this work while it ran get one more run (a stopped run's work is the owner's call).
   const absorbed = finished[0]!.absorbed?.trim();
@@ -1272,6 +1733,39 @@ export async function finishRun(db: Db, input: FinishInput, deps: RunnerDeps = {
     }).catch(() => null);
   }
   await notifyQueue(db);
+}
+
+// PLA-155 (guided test 3): a PO run on a «Hacerlo ya» ticket wrote the code itself instead of handing it to Taller;
+// its deny rules blocked the commit, the push and the PR, and the run ended «ok» with the ticket In progress and the
+// change uncommitted in the ticket's worktree, which nobody could finish. When a PO run ends with its ticket still
+// In progress and uncommitted changes there, the ticket goes to Taller (Ready, owned by Taller, with a note); the
+// worktree is per ticket, so Taller finds the change and finishes it.
+export async function handPoCodeToTaller(db: Db, project: Project, key: string, cwd: string, git: GitFn): Promise<boolean> {
+  const t = await readerOf(db).get("tasks", { projectId: project.id, key });
+  if (!t || t.kind !== "ticket" || t.status !== ST.inProgress || !t.owner?.session_id) return false;
+  const st = await git(["status", "--porcelain"], cwd);
+  const changed = st.code === 0 ? st.stdout.split("\n").filter((l) => l.trim()).map((l) => l.slice(3)) : [];
+  if (changed.length === 0) return false;
+  const ref = { id: project.id, slug: project.slug };
+  const taller = await serviceAgent(db, "taller", ref);
+  if (!taller) return false;
+  // The run's own session gives the ticket back (In progress → Ready), as an expired runner lease does.
+  const base = sysCtx("runner.po_code");
+  await claim(db, { project: project.slug, key, action: "release" } as never, { ...base, system: false, actor: { ...t.owner, machine: hostname() } } as Ctx);
+  const now = await readerOf(db).get("tasks", { projectId: project.id, key });
+  await setTask(
+    db,
+    {
+      project: project.slug,
+      key,
+      version: now!.version,
+      owner_agent: taller.slug,
+      note: `El PO escribió el cambio pero no puede confirmarlo: pasa a Taller. En el worktree del ticket quedan sin confirmar: ${changed.slice(0, 8).join(", ")}${changed.length > 8 ? ", …" : ""}. Revísalo, pruébalo, confírmalo y abre el PR.`,
+    } as never,
+    base,
+  );
+  await enqueueWake(db, { agent: taller, project: ref, taskKey: key, reason: "the PO left code it cannot commit", trigger: "event" });
+  return true;
 }
 
 // ---- Stop live runs (kill switches)
@@ -1289,7 +1783,7 @@ export function stopLive(filter: (run: { agentId: string; projectId: string; rol
 }
 
 // PLA-I36-9: stop one run (Detener on Compañía), not its project. false when it is not live in this process.
-export function stopRun(runId: string, reason = "detenido desde Compañía"): boolean {
+export function stopRun(runId: string, reason = say(RUNNER_WORDS).stoppedFromCompany): boolean {
   const run = live.get(runId);
   // PLA-I60-3: a run another process supervises is stopped by that process (stop_requested, actOnStopRequests).
   if (!run) {
@@ -1300,6 +1794,19 @@ export function stopRun(runId: string, reason = "detenido desde Compañía"): bo
   run.stopReason = reason;
   run.proc.stop(reason);
   return true;
+}
+
+// NEWPROJ-7: deleting a project stops every run of it this process supervises (the asistente's too) and waits
+// until each has exited and written its end, so the rows go only after the processes are gone. A run that ignores
+// SIGINT gets SIGTERM and SIGKILL from its supervisor; waitMs caps the wait. Returns how many were signalled.
+export async function stopProjectRuns(projectId: string, reason: string, waitMs = 30_000): Promise<number> {
+  const runs = [...live.values()].filter((run) => run.projectId === projectId);
+  const n = stopLive((run) => run.projectId === projectId, reason);
+  if (runs.length === 0) return n;
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([Promise.all(runs.map((run) => run.finished)), new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))]);
+  clearTimeout(timer);
+  return n;
 }
 
 // Each tick: switches off stop the live runs in their scope. No token budgets (PLA-21).
@@ -1525,7 +2032,7 @@ export function defaultProbeUsage(env: NodeJS.ProcessEnv = process.env): () => P
   return () =>
     new Promise((resolve) => {
       const command = claudeCommand(null, env);
-      const cwd = path.join(tmpdir(), "plania-runs");
+      const cwd = defaultRunTmpDir(env);
       mkdirSync(cwd, { recursive: true });
       execFile(command, ["-p", "/usage", "--output-format", "json", "--strict-mcp-config"], { cwd, env: childEnv(env), timeout: 60_000 }, (err, stdout) => {
         if (err) return resolve(null);
@@ -1541,3 +2048,43 @@ export function defaultProbeUsage(env: NodeJS.ProcessEnv = process.env): () => P
 
 export const newRunId = (): string => randomUUID();
 export type { PlanWindowReading };
+
+// PLA-I73-4: a Taller step waiting in the queue (lanes full, or the machine busy) gets its worktree made now, with its
+// modules cloned and, when stacked, cut from the step under it, so the run starts on a ready checkout. At most `limit`
+// per tick; the footprint is the one start would register.
+export async function prewarmQueued(db: Db, deps: RunnerDeps = {}, limit = 2): Promise<string[]> {
+  const env = deps.env ?? process.env;
+  const root = rootOf(deps, env);
+  const r = readerOf(db);
+  const rows = await r.find("agentRuns", { status: "queued", role: "taller", taskKey: notNull() }, { orderBy: [{ column: "queuedAt" }], limit: 20 });
+  const made: string[] = [];
+  for (const row of rows) {
+    if (made.length >= limit) break;
+    const project = await r.get("projects", { id: row.projectId });
+    if (!project) continue;
+    const t = await r.get("tasks", { projectId: project.id, key: row.taskKey! });
+    if (!t || t.status !== ST.ready) continue;
+    const target = worktreePathFor(root, project.slug, t.key);
+    if (existsSync(target)) continue;
+    const repo = repoPathOf(project.slug, project.settings, env);
+    if (!existsSync(repo)) continue;
+    const agent = await r.get("agents", { id: row.agentId });
+    const stacked = await stackBaseOf(db, t.id);
+    const from = stacked?.branch ?? (await earlyBaseOf(db, t.id))?.branch;
+    const branch = t.branch?.trim() || branchFor(t.key, await workPatternOf(db, project.id));
+    const out = await withRepoLock(db, repo, () =>
+      ensureWorktree({ repo, root, project: project.slug, key: t.key, branch, base: startBranchOf(project.settings), ...(from ? { from } : {}) }, carefulGit(deps.git ?? defaultGit)),
+    ).catch(() => null);
+    if (!out?.ok || !out.created) continue;
+    await cloneModules(repo, out.path).catch(() => false);
+    if (deps.footprints !== false) {
+      await registerFootprint(
+        db,
+        { project: project.slug, kind: "worktree", locator: out.path, purpose: `Runner worktree for ${t.key} (${agent?.slug ?? "taller"})`, teardown: `git -C ${repo} worktree remove ${out.path}`, task_key: t.key },
+        { ...sysCtx("runner.worktree"), actor: { ...sysCtx("runner.worktree").actor, session_id: `runner-${agent?.slug ?? "taller"}` } },
+      ).catch(() => undefined);
+    }
+    made.push(t.key);
+  }
+  return made;
+}

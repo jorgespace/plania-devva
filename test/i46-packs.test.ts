@@ -171,7 +171,7 @@ test("I46-12: the API reads and sets a role's packs (screen only); unknown packs
   const catalog = await app.request("/api/company/packs", { headers: jorge });
   assert.equal(catalog.status, 200);
   const body = (await catalog.json()) as { packs: { slug: string; name: string; when: string; doc_id: string }[] };
-  assert.deepEqual(Object.keys(body.packs[0]!).sort(), ["doc_id", "name", "slug", "when"]);
+  assert.deepEqual(Object.keys(body.packs[0]!).sort(), ["doc_id", "name", "sha", "slug", "source", "when"]);
 
   const put = await app.request("/api/company/projects/micasa/team/taller/packs", { method: "PUT", headers: jorge, body: JSON.stringify({ packs: ["pruebas-primero", "pruebas-primero"] }) });
   assert.equal(put.status, 200);
@@ -198,6 +198,8 @@ test("I46-12 #2/#3: the role with the pack has it in its worktree and prompt; a 
   await store.fix((uow) => uow.update("agents", { slug: "taller" }, { skillPacks: ["pruebas-primero"] }));
   await ready("RUN-PK");
   const f = fakes();
+  // AUDIT-3: the worktree delivery is the older mode now (test/audit-kit.test.ts covers the plugin one).
+  f.deps.env.PLANIA_KIT_MODE = "worktree";
   assert.equal((await wake("taller", f.deps, "RUN-PK")).reason, "ok");
   const withPack = f.spawned[0]!;
   assert.deepEqual(withPack.packFiles, [".gitignore", "pruebas-primero.md"]);

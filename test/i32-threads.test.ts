@@ -15,6 +15,7 @@ const { createMcpServer } = await import("../src/mcp/register.js");
 const { createSession, SESSION_COOKIE } = await import("../src/auth/session.js");
 const { seedOrg } = await import("../scripts/seed-org.js");
 const writes = await import("../src/mcp/writes.js");
+const { runSession } = await import("../src/runner/run-session.js");
 
 type Db = ReturnType<typeof makeDb>["db"];
 let store: TestStore;
@@ -95,13 +96,13 @@ test("I32-3 #1: Jorge's message in the company thread queues Asistente's wake, e
   const out = (await res.json()) as { message: Message; created: unknown; wake: string };
   assert.equal(out.created, null);
   assert.equal(out.wake, "queued");
-  assert.deepEqual(out.message.author, { agent: "jorge", role: "ceo" });
+  assert.deepEqual(out.message.author, { agent: "owner", role: "ceo" });
   assert.deepEqual(out.message.actions, []);
   assert.deepEqual(await runsOf("asistente"), [{ status: "queued", task_key: null, role: "asistente", project: "zigzag" }]);
   const ev = (await store.find("events", { type: "thread.message" })).map((r) => r.payload);
   assert.equal(ev.length, 1);
   assert.equal(ev[0]!.thread_kind, "company");
-  assert.equal(ev[0]!.author, "jorge");
+  assert.equal(ev[0]!.author, "owner");
   assert.equal((await store.find("events", { type: "wake.queued" })).filter((e) => e.payload.agent === "asistente").length, 1);
   // "company" works as the thread id too, and a second message coalesces into the queued run.
   assert.equal((await post(`/api/threads/company/messages`, { body: "y también el brief" })).status, 201);
@@ -120,7 +121,7 @@ test("I32-3 #1: Jorge's message in a project thread makes a Ready ticket for its
   const row = await store.get("tasks", { key: out.created.key });
   const owner = row?.ownerAgent ? await store.get("agents", { id: row.ownerAgent }) : undefined;
   const t = row && owner && { status: row.status, origin: row.origin, owner: owner.slug };
-  assert.deepEqual(t, { status: "Ready", origin: "jorge", owner: "po-micasa" });
+  assert.deepEqual(t, { status: "Ready", origin: "owner", owner: "po-micasa" });
   assert.deepEqual(await runsOf("po-micasa"), [{ status: "queued", task_key: out.created.key, role: "product-owner", project: "micasa" }]);
 
   // A paused project still gets the ticket; nothing is queued and the reply says why.
@@ -173,7 +174,8 @@ test("I32-3 #3: a runner's finish leaves a line with links in its project thread
   const taller = (await store.get("agents", { slug: "taller-micasa" }))!.id;
   const micasa = await store.projectId("micasa");
   const run = (await store.fix((uow) => uow.insert("agentRuns", { agentId: taller, projectId: micasa, role: "taller", status: "running", startedAt: new Date(Date.now() - 60_000) }))).id;
-  const actor = { agent: "taller-micasa", session_id: `run-${run.slice(0, 8)}` };
+  // The session a run writes as today (16 hex, PLA-I60-1); the 8-hex form is covered in i32-thread-actions.
+  const actor = { agent: "taller-micasa", session_id: runSession(run) };
   const created = (await writes.createTask(db, { project: "micasa", title: "Página de precios", scope: "s", checks: ["La página muestra tres planes"], status: "Ready" } as never, { actor })) as { key: string };
   await writes.claim(db, { project: "micasa", key: created.key } as never, { actor });
 
@@ -202,8 +204,15 @@ test("I32-3 #3: a runner's finish leaves a line with links in its project thread
   assert.deepEqual(last.links.map((l) => [l.kind, l.ref]), [["ticket", created.key], ["pr", "https://github.com/example/micasa/pull/7"]]);
   assert.deepEqual(last.actions, ["fusionar", "cambios"], "a code ticket In review with a PR can be merged or sent back");
 
+  // PLA-I32-4: the same run's question lands in the thread too, with the question attached.
+  const other = (await writes.createTask(db, { project: "micasa", title: "Nombre del plan caro", scope: "s", checks: ["c"], work_type: "ops" } as never, { actor })) as { key: string };
+  const asked = await call("ask", { actor, project: "micasa", key: other.key, question: "¿Premium o Pro?" });
+  assert.ok(asked.question_id, JSON.stringify(asked));
+  const afterAsk = ((await (await get(`/api/threads/${thread.id}`)).json()) as { messages: Message[] }).messages;
+  assert.equal(afterAsk.filter((m) => m.question_id === asked.question_id).length, 1, "a 16-hex run session's question is posted");
+
   // A session that is not a runner run leaves no line.
-  const before = view.messages.length;
+  const before = afterAsk.length;
   await call("add_result", { actor: { agent: "taller-micasa", session_id: "manual" }, project: "micasa", key: created.key, kind: "test", verdict: "pass", cite: "manual" });
   assert.equal(((await (await get(`/api/threads/${thread.id}`)).json()) as { messages: Message[] }).messages.length, before);
 });
@@ -291,11 +300,16 @@ test("PLA-53: restart --check names what a restart would kill, and passes with n
   const busy = check();
   assert.equal(busy.status, 1);
   for (const k of [a.key, b.key, c.key]) assert.ok(busy.stdout.includes(k), `${k} is named`);
-  // A «tomando» with nobody behind it (older than a whole pass) does not hold a restart: the sweep takes it again.
-  await store.fix(async (uow) => {
-    const t = (await uow.get("tasks", { projectId: micasa, key: c.key }))!;
-    await uow.update("tasks", { id: t.id }, { probador: { ...t.probador!, at: new Date(uow.now.getTime() - 10 * 60_000).toISOString() } });
-  });
+  // PLA-102: a pass 10 minutes in still holds a restart (MIA-I10-3's ran past 6 and was cut).
+  const passAt = (minutes: number) =>
+    store.fix(async (uow) => {
+      const t = (await uow.get("tasks", { projectId: micasa, key: c.key }))!;
+      await uow.update("tasks", { id: t.id }, { probador: { ...t.probador!, at: new Date(uow.now.getTime() - minutes * 60_000).toISOString() } });
+    });
+  await passAt(10);
+  assert.ok((await inFlight(db)).some((f) => f.kind === "fotos"), "a long pass is still in flight");
+  // A «tomando» with nobody behind it (older than PASS_MS) does not hold a restart: the sweep takes it again.
+  await passAt(25);
   assert.deepEqual((await inFlight(db)).map((f) => f.kind).sort(), ["qa", "run"]);
   await settle();
   await store.fix(async (uow) => {

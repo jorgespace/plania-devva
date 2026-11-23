@@ -19,7 +19,7 @@ const { createTask } = await import("../src/mcp/writes.js");
 const { setProject } = await import("../src/mcp/project.js");
 const { findProject } = await import("../src/mcp/queries.js");
 const { parseCaptureSettings } = await import("../src/captures/settings.js");
-const { runCapture, pngHeight } = await import("../src/captures/run.js");
+const { runCapture, pngHeight, pageError } = await import("../src/captures/run.js");
 const { findChrome, launchChrome } = await import("../src/captures/chrome.js");
 const { KEEP_UNTIED } = await import("../src/captures/store.js");
 type Browser = import("../src/captures/chrome.js").Browser;
@@ -64,7 +64,8 @@ function png(width: number, height: number, tag = ""): Buffer {
 }
 
 const BASE = "http://localhost:3999";
-type Fake = { logins: string[]; shots: string[]; broken: Set<string>; closed: number };
+// PLA-166: hydrateAfter: how many readiness checks the login form fails before React attaches; a submit before that is lost.
+type Fake = { logins: string[]; shots: string[]; broken: Set<string>; closed: number; hydrateAfter?: number; checks?: number; dropFirstSubmit?: boolean };
 // A browser over a pretend app: /panel/** wants the login; /panel lists one ficha at /panel/novias/n1.
 function fakeBrowser(state: Fake, password: () => string | null): () => Promise<Browser> {
   return async () => {
@@ -84,6 +85,20 @@ function fakeBrowser(state: Fake, password: () => string | null): () => Promise<
           return { status: 200, url: at };
         },
         async evaluate<T>(js: string): Promise<T> {
+          if (js.includes("__planiaFormReady")) {
+            state.checks = (state.checks ?? 0) + 1;
+            return (state.checks > (state.hydrateAfter ?? 0)) as T;
+          }
+          if (js.includes("requestSubmit") && (state.checks ?? 0) <= (state.hydrateAfter ?? 0)) {
+            state.logins.push("lost");
+            return "ok" as T;
+          }
+          if (js.includes("requestSubmit") && state.dropFirstSubmit) {
+            // PLA-168: a cold dev server that never answers the first submit in time.
+            state.dropFirstSubmit = false;
+            state.logins.push("slow");
+            return "ok" as T;
+          }
           if (js.includes("requestSubmit")) {
             const pw = password();
             state.logins.push(js.includes(JSON.stringify("asesora@example.com")) ? "asesora@example.com" : "?");
@@ -124,8 +139,11 @@ const exec: Exec = async (command, opts) => {
   return { code: 0, stdout: "Contraseña cambiada.\n", stderr: "" };
 };
 let appUp = true;
-const fakeFetch = (async () => {
+const fakeFetch = (async (url: string | URL) => {
   if (!appUp) throw new TypeError("fetch failed");
+  // PLA-153: the fake app sends a signed-out visit to /panel… to its login, like the real one.
+  const u = new URL(String(url));
+  if (u.pathname.startsWith("/panel") && u.pathname !== "/panel/entrar") return new Response(null, { status: 307, headers: { location: `/panel/entrar?desde=${u.pathname}` } });
   return new Response("ok", { status: 200 });
 }) as unknown as typeof fetch;
 const fake: Fake = { logins: [], shots: [], broken: new Set(), closed: 0 };
@@ -180,14 +198,14 @@ describe("capture settings", () => {
 describe("capture run (fake browser)", () => {
   let firstRun: Json;
 
-  test("every page at 1280 and 390, tied to the ticket, with commit, branch and time; the panel pages with the test user", async () => {
+  test("every page at 1440 and 390, tied to the ticket, with commit, branch and time; the panel pages with the test user", async () => {
     const before = listing(checkout);
     firstRun = await runCapture(db, { project: "zigzag", checkout, task_key: "ZIG-01", actor }, deps());
     assert.equal(firstRun.ok, 6);
     assert.equal(firstRun.failed, 0);
     assert.equal(firstRun.commit, "c0ffee1234567890c0ffee1234567890c0ffee12");
     assert.equal(firstRun.branch, "jl/mia-i5-3");
-    assert.deepEqual(fake.shots.sort(), ["/panel/novias/n1@1280", "/panel/novias/n1@390", "/panel@1280", "/panel@390", "/registro/ejemplo@1280", "/registro/ejemplo@390"].sort());
+    assert.deepEqual(fake.shots.sort(), ["/panel/novias/n1@1440", "/panel/novias/n1@390", "/panel@1440", "/panel@390", "/registro/ejemplo@1440", "/registro/ejemplo@390"].sort());
     // A fresh password on the seed's test user, typed twice on stdin in the checkout, then used to log in.
     const pw = execCalls.find((c) => c.command.includes("panel:usuario"))!;
     assert.equal(pw.command, "npm run --silent panel:usuario -- contrasena asesora@example.com");
@@ -204,7 +222,7 @@ describe("capture run (fake browser)", () => {
     const rows = (await store.find("captureStills")).map((r) => ({ status: r.status, viewport: r.viewport, width: r.width, height: r.height, commit: r.commit, branch: r.branch, tied: r.taskId !== null, taken_at: r.takenAt }));
     assert.equal(rows.length, 6);
     assert.ok(rows.every((r) => r.status === "ok" && r.commit && r.branch === "jl/mia-i5-3" && r.tied && r.taken_at));
-    assert.deepEqual([...new Set(rows.map((r) => `${r.viewport}:${r.width}:${r.height}`))].sort(), ["desktop:1280:900", "phone:390:900"]);
+    assert.deepEqual([...new Set(rows.map((r) => `${r.viewport}:${r.width}:${r.height}`))].sort(), ["desktop:1440:900", "phone:390:900"]);
   });
 
   test("the read: each page with its desktop and phone still, and the PNG behind the screen session", async () => {
@@ -212,7 +230,7 @@ describe("capture run (fake browser)", () => {
     assert.equal(r.project, "zigzag");
     assert.equal(r.configured, true);
     assert.deepEqual(r.start, { command: "npm run dev -- --port {port}", port: 3999, url: "http://localhost:3999" });
-    assert.deepEqual(r.viewports, { desktop: { width: 1280, height: 800 }, phone: { width: 390, height: 844 } });
+    assert.deepEqual(r.viewports, { desktop: { width: 1440, height: 800 }, phone: { width: 390, height: 844 } });
     assert.deepEqual(
       r.pages.map((p: Json) => [p.key, p.label, p.session]),
       [
@@ -282,10 +300,44 @@ describe("capture run (fake browser)", () => {
     assert.equal(now.pages[0].desktop.error, null, "fixed since the 500");
   });
 
+  test("PLA-166: a login form that hydrates late is waited for, then filled once; the submit is not lost", async () => {
+    fake.logins.length = 0;
+    fake.checks = 0;
+    fake.hydrateAfter = 3;
+    const r = await runCapture(db, { project: "zigzag", checkout, pages: ["panel"], actor }, { ...deps(), launch: fakeBrowser(fake, () => lastPassword), loginWaitMs: 5000 });
+    fake.hydrateAfter = 0;
+    assert.equal(r.failed, 0, JSON.stringify(r.stills));
+    assert.deepEqual(fake.logins, ["asesora@example.com"], "filled after the form was live, never lost");
+    assert.ok((fake.checks ?? 0) >= 4, "it asked until the form was live");
+  });
+
+  test("PLA-168: a login the cold app never answers is tried once more, and the pass goes on signed in", async () => {
+    fake.logins.length = 0;
+    fake.dropFirstSubmit = true;
+    const r = await runCapture(db, { project: "zigzag", checkout, pages: ["panel"], actor }, { ...deps(), launch: fakeBrowser(fake, () => lastPassword), loginWaitMs: 600 });
+    assert.equal(r.failed, 0, JSON.stringify(r.stills));
+    assert.deepEqual(fake.logins, ["slow", "asesora@example.com"]);
+  });
+
   test("a wrong password is not a session: the page that asks to log in again is an error, never a still of the login", async () => {
     const r = await runCapture(db, { project: "zigzag", checkout, pages: ["panel"], actor }, { ...deps(), launch: fakeBrowser(fake, () => "not-the-one"), loginWaitMs: 800 });
     assert.equal(r.ok, 0);
     assert.ok(r.stills.every((s: Json) => /No se pudo entrar con asesora@example.com/.test(s.error)));
+  });
+
+  test("PLA-153: a view the muestra forgot to mark session, which the app sends to its login, is taken signed in", async () => {
+    const views = [
+      { key: "vestidos", label: "Vestidos", path: "/panel/novias/n1" },
+      { key: "registro", label: "Registro", path: "/registro/ejemplo" },
+    ];
+    fake.logins.length = 0;
+    const r = await runCapture(db, { project: "zigzag", checkout, views, viewports: ["desktop"], actor } as never, deps());
+    const of = (page: string) => r.stills.find((s: Json) => s.page === page)!;
+    assert.equal(of("vestidos").status, "ok", of("vestidos").error ?? "");
+    const row = (await store.get("captureStills", { id: of("vestidos").id }))!;
+    assert.equal(row.url, `${BASE}/panel/novias/n1`, "the panel page, not the login");
+    assert.equal(of("registro").status, "ok");
+    assert.deepEqual(fake.logins, ["asesora@example.com"], "signed in once, for the panel view only");
   });
 
   test("untied stills are pruned to the last few per page and viewport; a ticket's stills stay", async () => {
@@ -340,6 +392,22 @@ describe("capture run (real headless Chrome)", { skip: chrome ? false : "no Chro
       if (url.pathname.startsWith("/panel") && !authed) return (res.writeHead(307, { location: "/panel/entrar" }), res.end());
       if (url.pathname === "/panel") return html(200, `<h1>Panel</h1><a href="/panel/novias/n7?q=1">Ana Ejemplo</a>`);
       if (url.pathname === "/panel/novias/n7") return html(200, `<h1>Ficha de Ana</h1>`);
+      // PLA-76: a page that answers 200 but shows Next's dev error overlay; one with only Next's badge; a sheet whose
+      // button (no id, no class worth naming) opens the overlay when clicked, so a click is visible as an error.
+      const portal = (inner: string) => `<nextjs-portal></nextjs-portal><script>document.querySelector('nextjs-portal').attachShadow({mode:'open'}).innerHTML = ${JSON.stringify(`<style>h1{color:red}</style>${inner}`)};</script>`;
+      if (url.pathname === "/roto") return html(200, `<h1>Citas</h1>${portal(`<div><h1>Unhandled Runtime Error</h1><p>Error: relation "citas" does not exist</p></div>`)}`);
+      if (url.pathname === "/badge") return html(200, `<h1>Citas</h1>${portal(`<div><button>N</button></div>`)}`);
+      if (url.pathname === "/hoja")
+        return html(
+          200,
+          `<h1>Ficha</h1><script>function abrir() { document.body.insertAdjacentHTML('beforeend', '<nextjs-portal></nextjs-portal>'); document.querySelector('nextjs-portal').attachShadow({ mode: 'open' }).innerHTML = '<div><h1>Runtime Error</h1><p>Error: clicked</p></div>'; }</script><div><button onclick="abrir()">Actualizar seguimiento</button></div>`,
+        );
+      // PLA-105: «Ver horas» loads the times 1.5 s later (as a server action does), then «17:00» can be clicked.
+      if (url.pathname === "/tarde")
+        return html(
+          200,
+          `<h1>Mover</h1><script>function ver() { setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<div aria-label="Hora" role="group"><button onclick="abrir()">17:00</button></div>'), 1500); } function abrir() { document.body.insertAdjacentHTML('beforeend', '<nextjs-portal></nextjs-portal>'); document.querySelector('nextjs-portal').attachShadow({ mode: 'open' }).innerHTML = '<div><h1>Runtime Error</h1><p>Error: clicked</p></div>'; }</script><button onclick="ver()">Ver horas</button>`,
+        );
       return html(404, "no");
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -350,7 +418,7 @@ describe("capture run (real headless Chrome)", { skip: chrome ? false : "no Chro
     rmSync(secrets, { recursive: true, force: true });
   });
 
-  test("stills at 1280 and 390, the panel and the ficha through the login with the test user", { timeout: 120_000 }, async () => {
+  test("stills at 1440 and 390, the panel and the ficha through the login with the test user", { timeout: 120_000 }, async () => {
     const p = await findProject(db, "micasa");
     await setProject(
       db,
@@ -372,9 +440,58 @@ describe("capture run (real headless Chrome)", { skip: chrome ? false : "no Chro
     for (const row of rows) {
       const b = readFileSync(path.join(STORE, "micasa", row.file));
       assert.equal(b.readUInt32BE(0), 0x89504e47, "a PNG");
-      assert.equal(b.readUInt32BE(16), row.viewport === "desktop" ? 1280 : 780, `${row.page_key} ${row.viewport} width in device pixels`);
+      assert.equal(b.readUInt32BE(16), row.viewport === "desktop" ? 1440 : 780, `${row.page_key} ${row.viewport} width in device pixels`);
     }
     // The panel pages are not the login page: their stills differ from each other and from the form's.
     assert.equal(new Set(rows.filter((x) => x.viewport === "desktop").map((x) => x.file)).size, 3);
+  });
+
+  test("PLA-76: a page showing Next's error overlay is an error with its first line, not a still; Next's badge alone is fine", { timeout: 120_000 }, async () => {
+    const views = [
+      { key: "roto", label: "Roto", path: "/roto" },
+      { key: "badge", label: "Con insignia", path: "/badge" },
+    ];
+    const r = await runCapture(db, { project: "micasa", checkout, base_url: `http://127.0.0.1:${port}`, commit: "abc1234", branch: "sandbox", views, viewports: ["desktop"], actor }, { launch: launchChrome });
+    const by = Object.fromEntries(r.stills.map((s: Json) => [s.page, s]));
+    assert.equal(by.roto.status, "error");
+    assert.equal(by.roto.error, '/roto muestra un error: Unhandled Runtime Error: Error: relation "citas" does not exist');
+    assert.equal(by.badge.status, "ok", JSON.stringify(by.badge));
+  });
+
+  test("PLA-76: acciones.click takes a button's visible text or a CSS selector", { timeout: 120_000 }, async () => {
+    const views = [
+      { key: "texto", label: "Por texto", path: "/hoja", acciones: [{ click: "Actualizar seguimiento" }] },
+      { key: "selector", label: "Por selector", path: "/hoja", acciones: [{ click: "div > button" }] },
+      { key: "nada", label: "No existe", path: "/hoja", acciones: [{ click: "Borrar todo" }] },
+    ];
+    const r = await runCapture(db, { project: "micasa", checkout, base_url: `http://127.0.0.1:${port}`, commit: "abc1234", branch: "sandbox", views, viewports: ["desktop"], actor }, { launch: launchChrome });
+    const by = Object.fromEntries(r.stills.map((s: Json) => [s.page, s.error]));
+    // The click opens the page's (fake) error overlay, so a click that happened shows as that error.
+    assert.equal(by.texto, "/hoja muestra un error: Runtime Error: Error: clicked");
+    assert.equal(by.selector, "/hoja muestra un error: Runtime Error: Error: clicked");
+    assert.equal(by.nada, "En /hoja no encontré «Borrar todo»");
+  });
+
+  test("PLA-105: an action waits for a target that appears after an async load; one that never appears still fails", { timeout: 120_000 }, async () => {
+    const views = [
+      { key: "tarde", label: "Hora tardía", path: "/tarde", acciones: [{ click: "Ver horas" }, { click: '[aria-label="Hora"] button' }] },
+      { key: "nunca", label: "Nunca llega", path: "/tarde", acciones: [{ click: "Ver horas" }, { click: "18:30" }] },
+    ];
+    const r = await runCapture(db, { project: "micasa", checkout, base_url: `http://127.0.0.1:${port}`, commit: "abc1234", branch: "sandbox", views, viewports: ["desktop"], actor }, { launch: launchChrome });
+    const by = Object.fromEntries(r.stills.map((s: Json) => [s.page, s.error]));
+    assert.equal(by.tarde, "/tarde muestra un error: Runtime Error: Error: clicked");
+    assert.equal(by.nunca, "En /tarde no encontré «18:30»");
+  });
+});
+
+describe("PLA-76: pageError reads a framework error off the page", () => {
+  test("Next's overlay, the production «Application error», a bare 500; the badge or an app's own words are not errors", () => {
+    assert.equal(pageError({ overlay: "Unhandled Runtime Error\nError: relation \"citas\" does not exist\nCall Stack", body: "" }), 'Unhandled Runtime Error: Error: relation "citas" does not exist');
+    assert.equal(pageError({ overlay: "1 of 2\nBuild Error\n\nModule not found: Can't resolve './x'", body: "" }), "Build Error: Module not found: Can't resolve './x'");
+    assert.equal(pageError({ overlay: "", body: "Application error: a client-side exception has occurred (see the browser console for more information)." }), "Application error: a client-side exception has occurred (see the browser console for more information).");
+    assert.equal(pageError({ overlay: "", body: "Internal Server Error" }), "Internal Server Error");
+    assert.equal(pageError({ overlay: "N\nIssues", body: "Citas de hoy\nSin citas hoy" }), null);
+    assert.equal(pageError({ overlay: "", body: "Nuestro servidor de citas tuvo un error de red ayer" }), null);
+    assert.equal(pageError(null), null);
   });
 });

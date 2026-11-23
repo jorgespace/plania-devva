@@ -111,10 +111,11 @@ before(async () => {
 beforeEach(async () => {
   merges = [];
   ghBase = "sandbox";
+  // PLA-I73-3: these tests are about the switch; one review per module (the new default) has its own tests below.
   await store.fix(async (uow) => {
     for (const p of await uow.find("projects")) {
       const { auto_accept: _off, ...settings } = p.settings ?? {};
-      await uow.update("projects", { id: p.id }, { runsPaused: p.slug !== "micasa", settings: settings as typeof p.settings });
+      await uow.update("projects", { id: p.id }, { runsPaused: p.slug !== "micasa", settings: { ...settings, velocidad: { revision: "por_paso" } } as typeof p.settings });
     }
     await uow.update("runnerSettings", { id: 1 }, { companyPaused: false });
   });
@@ -166,7 +167,7 @@ test("I40-7 #1: each condition holds it back and says why: an open check, a waiv
     ["Prueba vieja", { commit: "b".repeat(40) }, /último commit/],
     ["PR en rojo", { ci: "failure" }, /Las pruebas fallan/],
     ["PR corriendo", { ci: "pending" }, /siguen corriendo/],
-    ["PR a main", { base: "main" }, /va a main/],
+    ["PR a main", { base: "main" }, /no va a la rama de trabajo/],
     ["De otro", { author: "taller-workia" }, /No la entregó alguien del equipo/],
   ];
   for (const [title, patch, why] of cases) {
@@ -186,7 +187,7 @@ test("I40-7 #1: each condition holds it back and says why: an open check, a waiv
   ghBase = "main";
   const out = await sweepAutoAccept(db);
   assert.deepEqual(out.accepted, []);
-  assert.match(out.held[0]!.reason, /solo se fusiona a sandbox/);
+  assert.match(out.held[0]!.reason, /no apunta a la rama de trabajo/);
   assert.equal((await mergedEvents(sneaky.key)).length, 0);
   assert.equal(merges.length, 0);
 });
@@ -212,4 +213,29 @@ test("I40-7 #4: the switch is the screen's only, and it survives a read", async 
   assert.equal(String((await store.get("projects", { slug: "micasa" }))!.settings.auto_accept), "true");
   await option(false);
   assert.equal((await card()).auto_accept.on, false);
+});
+
+// ---- PLA-I73-3: one review per module. With revision por_modulo (the default) a green delivery with no risk is
+// accepted by itself; a delivery that touches login or payments waits for the owner.
+test("PLA-I73-3: one review per module accepts a green riskless delivery and holds a risky one", async () => {
+  await store.fix(async (uow) => {
+    const p = (await uow.get("projects", { slug: "micasa" }))!;
+    const { velocidad: _v, ...settings } = p.settings ?? {};
+    await uow.update("projects", { id: p.id }, { settings: settings as typeof p.settings });
+  });
+  const ok = await delivery("Catálogo como revista");
+  const risky = await delivery("Pantalla de acceso");
+  const touched = (key: string, files: string[]) =>
+    store.fix(async (uow) => {
+      const t = (await uow.get("tasks", { key }))!;
+      await uow.insert("events", { projectId: t.projectId, taskId: t.id, taskKey: t.key, type: "task.areas_touched", actor: { agent: "plania" } as Actor, payload: { files } });
+    });
+  await touched(ok.key, ["src/app/catalogo/revista.tsx"]);
+  await touched(risky.key, ["src/app/panel/login/page.tsx"]);
+  await store.fix((uow) => uow.update("tasks", { key: [ok.key, risky.key] }, { cambio: "no_se_ve" }));
+  const out = await sweepAutoAccept(db);
+  assert.deepEqual(out.accepted, [ok.key]);
+  assert.equal(out.held.length, 1);
+  assert.match(out.held[0]!.reason, /acceso o las sesiones/);
+  assert.equal(await status(risky.key), "In review");
 });

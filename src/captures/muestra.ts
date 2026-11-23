@@ -4,6 +4,7 @@
 // without one: MUESTRA_REQUIRED. Nobody is asked to approve what they cannot see.
 import { z } from "zod";
 import type { GitFn } from "../runner/worktree.js";
+import { LANDING, LANDING_HINT } from "./settings.js";
 
 const PATH = /^\/[^\s]*$/;
 const KEY = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -23,6 +24,9 @@ const vista = z
     session: z.boolean().optional(), // behind the test user's login
     follow: z.string().min(1).max(200).optional(), // as in settings.capture.pages: go to the first matching href
     acciones: z.array(accion).max(6).optional(),
+    // PLA-I74-10: the path the photo must be on (default: path; with a follow path, anything under it). A photo taken
+    // on another URL is marked wrong and holds «Aceptar» back.
+    url: z.string().regex(LANDING, LANDING_HINT).max(300).optional(),
   })
   .strict();
 
@@ -31,6 +35,11 @@ export const muestraSchema = z
     frase: z.string().trim().min(1).max(160), // what changes for the people who use the app, in one sentence
     vistas: z.array(vista).min(1).max(6),
     pasos: z.array(z.string().trim().min(1).max(140)).length(3), // three ways to try it, in plain words
+    // PLA-78: the fake rows the views need (an appointment today, a client with a stage…), as SQL. Plania loads them
+    // into both throwaway copies' databases (<db>_entrega and <db>_prueba, never the app's own) in one transaction
+    // before the pictures, so the card shows the feature with data instead of its empty state. Times relative to
+    // now() keep «today» true whenever the pictures are taken.
+    datos: z.string().trim().min(1).max(20_000).optional(),
   })
   .strict()
   .superRefine((m, ctx) => {
@@ -68,7 +77,7 @@ export function uiFiles(files: string[], globs: readonly string[] = DEFAULT_UI_G
   return files.filter((f) => !NOT_UI.some((n) => n.test(f)) && res.some((r) => r.test(f)));
 }
 
-// The files a branch changes against its base, read from the project's repo on this Mac. It fetches both first
+// The files a branch changes against its base, read from the project's repo on this machine. It fetches both first
 // (best effort) and reads origin's refs, falling back to local ones. null when it cannot tell.
 export async function changedFiles(git: GitFn, repo: string, base: string, branch: string): Promise<string[] | null> {
   await git(["fetch", "--quiet", "origin", base, branch], repo).catch(() => null);
@@ -100,5 +109,58 @@ export function parseMuestra(v: unknown): { ok: true; muestra: Muestra } | { ok:
   return { ok: false, field: ["muestra", ...issue.path].join("."), hint: issue.message };
 }
 
+// PLA-158 (F-28): a selector the browser cannot read (Playwright's a:has-text("Ana")) was only found when the views
+// were photographed, 21 minutes later. Node has no DOM to parse CSS, so this is a conservative check: it refuses the
+// Playwright and jQuery forms document.querySelector never accepts, and brackets or quotes left open. A path (follow
+// "/panel/x/") and a click by visible text stay allowed; in text mode a quote counts only inside [ ].
+const NOT_CSS: [RegExp, string][] = [
+  [/:has-text\(/i, ":has-text( is Playwright's, not CSS"],
+  [/:text(-is|-matches)?\(/i, ":text( is Playwright's, not CSS"],
+  [/:contains\(/i, ":contains( is jQuery's, not CSS"],
+  [/:visible\b/i, ":visible is Playwright's or jQuery's, not CSS"],
+  [/:nth-match\(/i, ":nth-match( is Playwright's, not CSS"],
+  [/>>/, ">> chains Playwright locators, not CSS"],
+  [/^\s*(text|xpath|css|id|data-testid|role)=/i, "a Playwright engine prefix (text=, xpath=…) is not CSS"],
+];
+
+export function selectorProblem(value: string, mode: "selector" | "text"): string | null {
+  for (const [re, why] of NOT_CSS) if (re.test(value)) return why;
+  const stack: string[] = [];
+  let quote: string | null = null;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i]!;
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "\\") i++;
+    else if ((c === '"' || c === "'") && (mode === "selector" || stack.at(-1) === "[")) quote = c;
+    else if (c === "[" || c === "(") stack.push(c);
+    else if (c === "]" || c === ")") {
+      if (stack.pop() !== (c === "]" ? "[" : "(")) return `an unmatched ${c}`;
+    }
+  }
+  if (quote) return `a quote ${quote} left open`;
+  if (stack.length) return `a ${stack.at(-1)} left open`;
+  return null;
+}
+
+/** The first follow, click or fill in the muestra that document.querySelector could not read, with why. */
+export function muestraSelectorIssue(m: Muestra): { field: string; value: string; hint: string } | null {
+  for (const [i, v] of m.vistas.entries()) {
+    if (v.follow && !v.follow.startsWith("/")) {
+      const why = selectorProblem(v.follow, "selector");
+      if (why) return { field: `muestra.vistas.${i}.follow`, value: v.follow, hint: `${why}: follow takes a path that starts with / (the link's href prefix) or a plain CSS selector` };
+    }
+    for (const [j, a] of (v.acciones ?? []).entries()) {
+      const [what, value, mode] = "click" in a ? (["click", a.click, "text"] as const) : (["fill", a.fill, "selector"] as const);
+      const why = selectorProblem(value, mode);
+      if (why) return { field: `muestra.vistas.${i}.acciones.${j}.${what}`, value, hint: `${why}: ${what === "click" ? "click takes the visible text of what to click or a plain CSS selector" : "fill takes a plain CSS selector"}` };
+    }
+  }
+  return null;
+}
+
 export const MUESTRA_HINT =
-  "this delivery changes the screen: pass muestra {frase (one sentence for the owner), vistas [{key, label, path, estado?, session?, acciones?}] (the views it touched), pasos [three ways to try it]} so Plania can photograph it before asking the owner";
+  "this delivery changes the screen: pass muestra {frase (one sentence for the owner), vistas [{key, label, path, estado?, session?, acciones?}] (the views it touched), pasos [three ways to try it], datos? (SQL with the fake rows the views need)} so Plania can photograph it before asking the owner";

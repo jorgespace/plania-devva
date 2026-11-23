@@ -99,9 +99,9 @@ test("I35-1 #1: parseProposal reads numbered options, the recommended one and th
 
 test("I35-1 #1: GET /api/company has plan, this_week, next and work per project and decisions[]", async () => {
   const c = await company();
-  assert.deepEqual(keys(c), ["asistente", "brief", "company", "decisions", "inbox", "motor_default", "plumbing", "projects", "week"]);
+  assert.deepEqual(keys(c), ["asistente", "brief", "claude_sign_in", "company", "decisions", "inbox", "motor_default", "plumbing", "projects", "week"]);
   for (const p of c.projects) {
-    assert.deepEqual(keys(p), ["ahora", "auto_accept", "goal", "latest", "light", "light_reason", "next", "next_first", "next_move", "orders", "paused", "pedidos", "plan", "plan_approval", "preview_url", "ready", "route", "rumbo", "runner", "slug", "stale_requests", "tablero", "team", "this_week", "thread", "title", "usage", "work"], p.slug);
+    assert.deepEqual(keys(p), ["ahora", "auto_accept", "goal", "latest", "light", "light_reason", "next", "next_first", "next_move", "orders", "paused", "pedidos", "plan", "plan_approval", "preview_url", "quiet_home", "ready", "route", "rumbo", "runner", "slug", "stale_requests", "tablero", "team", "this_week", "thread", "title", "usage", "work"], p.slug);
     assert.deepEqual(keys(p.this_week), ["docs", "done", "last_at", "prs"]);
     assert.deepEqual(keys(p.work), ["in_progress", "open"]);
   }
@@ -121,7 +121,7 @@ test("I35-1 #1: GET /api/company has plan, this_week, next and work per project 
     forecast_on: null,
   });
   assert.deepEqual([mia.this_week.done, mia.this_week.docs, mia.this_week.prs], [3, 1, 0]);
-  assert.deepEqual(mia.next, { title: "Kickoff con la boutique", key: "MIA-I1-1", owner: "jorge", due: null });
+  assert.deepEqual(mia.next, { title: "Kickoff con la boutique", key: "MIA-I1-1", owner: "owner", due: null });
   assert.deepEqual(mia.work, { open: 2, in_progress: 0 });
   assert.equal(c.projects.find((p: Json) => p.slug === "filmia").plan, null, "no Active initiative, no plan");
 
@@ -169,12 +169,12 @@ test("I35-1 #2: Elegir posts 'Elijo n' in the project thread, makes the PO's Rea
   assert.equal(out.created.kind, "ticket");
   const msgs = (await (await app.request("/api/threads/mianovia", { headers: jorge() })).json()) as { messages: Json[] };
   const mine = msgs.messages.at(-1)!;
-  assert.equal(mine.author.agent, "jorge");
+  assert.equal(mine.author.agent, "owner");
   assert.equal(mine.body, "Elijo 1: Planear el formulario con las respuestas por defecto del borrador, provisional");
   const created = await store.get("tasks", { key: out.created.key as string });
   const owner = created?.ownerAgent ? await store.get("agents", { id: created.ownerAgent }) : undefined;
   const ticket = created && owner ? { status: created.status, origin: created.origin, slug: owner.slug } : undefined;
-  assert.deepEqual(ticket, { status: "Ready", origin: "jorge", slug: "po-mianovia" });
+  assert.deepEqual(ticket, { status: "Ready", origin: "owner", slug: "po-mianovia" });
   assert.equal((await store.find("events", { type: "wake.queued" })).filter((e) => e.payload.agent === "po-mianovia").length >= 1, true);
 
   const again = await act(id, { action: "elegir", option: 2 });

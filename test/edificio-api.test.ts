@@ -123,7 +123,7 @@ test("I39-1 #4: asistente.unread counts the company thread's unread messages", a
   const before = (await company()).asistente;
   assert.equal(before.unread, 0);
   await store.fix(async (uow) => {
-    for (const [author, body] of [["asistente", "Uno"], ["asistente", "Dos"], ["jorge", "Mío"]] as const) {
+    for (const [author, body] of [["asistente", "Uno"], ["asistente", "Dos"], ["owner", "Mío"]] as const) {
       await uow.insert("threadMessages", { threadId: before.thread_id, authorAgent: author, authorRole: author, body, links: [] });
     }
   });

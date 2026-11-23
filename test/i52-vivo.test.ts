@@ -61,13 +61,19 @@ const get = (url: string, headers: Record<string, string> = {}) =>
   });
 
 describe("the helpers", () => {
-  test("only this Mac's loopback is a peer; the session wins a cookie clash; a redirect to the copy stays on the proxy", () => {
+  test("only this machine's loopback is a peer; the session wins a cookie clash; a redirect to the copy stays on the proxy", () => {
     assert.ok(vivo.isLoopback("127.0.0.1") && vivo.isLoopback("::1") && vivo.isLoopback("::ffff:127.0.0.1"));
     assert.ok(!vivo.isLoopback("192.168.1.20") && !vivo.isLoopback("100.64.0.3") && !vivo.isLoopback(undefined));
     assert.equal(vivo.withSession("a=1; sesion=vieja", [{ name: "sesion", value: "nueva" }]), "a=1; sesion=nueva");
     assert.equal(vivo.withSession(undefined, [{ name: "s", value: "1" }]), "s=1");
     assert.equal(vivo.localLocation("http://localhost:4100/panel?x=1", 4100), "/panel?x=1");
     assert.equal(vivo.localLocation("https://example.com/a", 4100), "https://example.com/a");
+    // PLA-91: the proxy's Origin and Referer become the copy's, so Server Actions accept form posts.
+    assert.equal(vivo.toCopyOrigin("http://localhost:58243", 58243, 3001), "http://localhost:3001");
+    assert.equal(vivo.toCopyOrigin("http://localhost:58243/panel/sucursales/x?y=1", 58243, 3001), "http://localhost:3001/panel/sucursales/x?y=1");
+    assert.equal(vivo.toCopyOrigin("http://mac.tail1234.ts.net:58243/panel", 58243, 3001), "http://localhost:3001/panel");
+    assert.equal(vivo.toCopyOrigin("https://example.com", 58243, 3001), "https://example.com", "another origin is left alone");
+    assert.equal(vivo.toCopyOrigin(undefined, 58243, 3001), undefined);
   });
 });
 
@@ -88,6 +94,8 @@ describe("En vivo", () => {
     assert.equal(redirect.status, 302);
     assert.equal(redirect.location, "/panel/entrar");
     assert.deepEqual(await vivo.startVivo(db, "zigzag"), r, "a second click returns the same copy");
+    // PLA-111 (F-33): the project's own port, the same on every start (any free one only when it is busy).
+    assert.equal(Number(new URL(r.local_url!).port), vivo.vivoPort("zigzag"));
   });
 
   test("with Tailscale it opens on the tailnet, and the entry goes when the copy stops", async () => {
@@ -102,6 +110,30 @@ describe("En vivo", () => {
     assert.deepEqual(tsCalls.at(-1), `off ${port}`);
     assert.equal(vivo.vivoRead("zigzag"), null);
     await assert.rejects(get(`${r.local_url}/`), "the proxy is closed");
+  });
+
+  test("PLA-158 (F-27): a tab left open on the live copy (its live-reload socket) never keeps it from closing", async () => {
+    const { connect } = await import("node:net");
+    const ws = http.createServer();
+    ws.on("upgrade", (_req, socket) => socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"));
+    await new Promise<void>((r) => ws.listen(0, "127.0.0.1", () => r()));
+    try {
+      vivo.setVivoDeps({ target: () => ({ port: (ws.address() as AddressInfo).port, worktree: null }), signIn: async () => [], tailscale: null });
+      const r = await vivo.startVivo(db, "zigzag");
+      const tab = connect(Number(new URL(r.local_url!).port), "127.0.0.1");
+      const switched = new Promise<void>((resolve) => tab.once("data", () => resolve()));
+      tab.on("error", () => undefined);
+      tab.write("GET /_next/webpack-hmr HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+      await switched;
+      const t0 = Date.now();
+      await vivo.stopVivo("zigzag");
+      assert.ok(Date.now() - t0 < 1500, `stopped in ${Date.now() - t0} ms`);
+      assert.equal(vivo.vivoRead("zigzag"), null);
+      tab.destroy();
+    } finally {
+      ws.closeAllConnections();
+      ws.close();
+    }
   });
 
   test("when signing in fails it still opens, and says who to enter as (Copiar contraseña)", async () => {

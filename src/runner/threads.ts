@@ -1,4 +1,4 @@
-// PLA-I32-3: the conversation. One company thread (Jorge and Asistente) and one thread per project (Jorge
+// PLA-I32-3: the conversation. One company thread (the owner and Asistente) and one thread per project (the owner
 // and its PO; the team answers there too). A message is written inside writeTx with a thread.message event,
 // so the event hook (src/runner/events.ts) can wake whoever should answer in the same transaction.
 // Company-thread events live in Asistente's home project (PLANIA_HOME_PROJECT, else plania, else the first
@@ -9,10 +9,11 @@ import { ToolError } from "../mcp/errors.js";
 import { writeTx, type Ctx, type Emit, type Q } from "../mcp/tx.js";
 import { readerOf, uowOf } from "../store/port.js";
 import { roleOf, writeVia } from "./limits.js";
+import { ST } from "../state/status.js";
 
 export const MAX_BODY = 4000;
 export const MAX_LINKS = 10;
-export const JORGE = { agent: "jorge", role: "ceo" } as const;
+export const OWNER_AUTHOR = { agent: "owner", role: "ceo" } as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const homeSlug = (env: NodeJS.ProcessEnv = process.env): string => env.PLANIA_HOME_PROJECT || env.PLANIA_PROMPTS_PROJECT || "plania";
@@ -173,10 +174,10 @@ export type ThreadView = { id: string; kind: "company" | "project"; project: str
 
 const PR_URL = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 
-// What Jorge can do on a message: answer its open question; accept (or merge, for a PR) and send back the
+// What the owner can do on a message: answer its open question; accept (or merge, for a PR) and send back the
 // ticket it links while that ticket is In review. Nothing once he acted, and nothing on his own messages.
 export async function actionsFor(db: Q, msg: ThreadMessage, projectId: string | null): Promise<MessageAction[]> {
-  if (msg.actionState || msg.authorAgent === JORGE.agent) return [];
+  if (msg.actionState || msg.authorAgent === OWNER_AUTHOR.agent) return [];
   const r = readerOf(db);
   if (msg.questionId) {
     const q = await r.get("questions", { id: msg.questionId });
@@ -186,7 +187,7 @@ export async function actionsFor(db: Q, msg: ThreadMessage, projectId: string | 
   if (!ticket) return [];
   const pid = projectId ?? null;
   const t = await r.get("tasks", pid ? { projectId: pid, key: ticket.ref } : { key: ticket.ref });
-  if (!t || t.status !== "In review") return [];
+  if (!t || t.status !== ST.inReview) return [];
   const pr = msg.links.find((l) => l.kind === "pr" && PR_URL.test(l.ref)) ?? (t.prUrl && PR_URL.test(t.prUrl) ? { ref: t.prUrl } : null);
   const code = (t.workType ?? "code") === "code" || t.workType === "bug" || t.workType === "debt";
   return pr && code ? ["fusionar", "cambios"] : ["aceptar", "cambios"];
@@ -254,7 +255,7 @@ export async function threadSummary(db: Q, thread: Thread, project: { slug: stri
   const rows = await newestFirst(db, thread.id);
   const last = rows[0];
   const readAt = thread.readAt?.getTime();
-  const unread = rows.filter((m) => m.authorAgent !== JORGE.agent && (readAt === undefined || m.at.getTime() > readAt)).length;
+  const unread = rows.filter((m) => m.authorAgent !== OWNER_AUTHOR.agent && (readAt === undefined || m.at.getTime() > readAt)).length;
   return {
     id: thread.id,
     kind: thread.kind as ThreadSummary["kind"],

@@ -3,7 +3,7 @@
 // - PLA-25: guard_override (a screen switch) lets runs go on past the guard; only status "rejected" still stops.
 // - The plan guard: no new run when the last reading is allowed_warning/rejected, or the 5-hour
 //   window is at or over the guard (default 70%). No reading, or a stale one, is unknown = stop.
-// - Company and project switches (runs_paused). Only Jorge's screen session writes any of these.
+// - Company and project switches (runs_paused). Only the owner's screen session writes any of these.
 import type { Db } from "../db/client.js";
 import type { AgentRun, PlanReading, RunnerSettings } from "../db/schema.js";
 import type { Q } from "../mcp/tx.js";
@@ -65,7 +65,8 @@ export function roleOf(agent: { slug: string; role: string; capabilities: string
   return null;
 }
 
-export const screenTz = (): string => process.env.PLANIA_TZ || "America/Mexico_City";
+import { screenTz } from "../locale.js"; // PLA-I2-3: one place
+export { screenTz };
 
 // The one settings row; made when missing (the migration seeds it, so that is a fresh database only).
 export async function loadSettings(db: Q): Promise<RunnerSettings> {
@@ -109,7 +110,7 @@ export async function weekBounds(_db: Q, now: Date, tz = screenTz()): Promise<{ 
 }
 
 // ---- Usage this week
-// PLA-21: weekly token budgets are gone (Jorge, 2026-11-12). The week's tokens are only shown, never checked.
+// PLA-21: weekly token budgets are gone (the owner, 2026-11-12). The week's tokens are only shown, never checked.
 
 // A project's usage is its team's; Asistente's runs (role asistente) count apart.
 export type UsageScope = { kind: "project"; projectId: string } | { kind: "asistente" } | { kind: "all" };
@@ -150,6 +151,8 @@ export async function weekUsage(db: Q, scope: UsageScope, weekStart: Date, weekE
 
 export type PlanState = "ok" | "warn" | "stopped" | "unknown";
 export type PlanView = {
+  // PLA-144: null when the last reading is stale (its five-hour reset has passed, or older than READING_TTL_MS with
+  // no reset time): an old figure must never read as the current one. read_at still says when the last one was taken.
   five_hour_pct: number | null;
   seven_day_pct: number | null;
   resets_at: string | null;
@@ -159,7 +162,7 @@ export type PlanView = {
   state: PlanState;
   read_at: string | null;
   source: string | null;
-  // PLA-25: Jorge's screen switch. While on, the percentage, a warning and an unknown reading do not stop a wake.
+  // PLA-25: the owner's screen switch. While on, the percentage, a warning and an unknown reading do not stop a wake.
   override: boolean;
 };
 
@@ -168,10 +171,22 @@ export async function lastReading(db: Q): Promise<PlanReading | null> {
   return row ?? null;
 }
 
+// PLA-56: a "rejected" reading speaks for its five-hour window: until its reset, or READING_TTL_MS with no reset.
+export const rejectedStillHolds = (reading: PlanReading, now: Date): boolean =>
+  reading.fiveHourResetsAt != null ? reading.fiveHourResetsAt.getTime() > now.getTime() : now.getTime() - reading.at.getTime() <= READING_TTL_MS;
+
+// PLA-144: a reading speaks for its own five-hour window only.
+export const readingStale = (reading: PlanReading | null, now: Date): boolean =>
+  !reading ||
+  now.getTime() - reading.at.getTime() > READING_TTL_MS ||
+  (reading.fiveHourResetsAt != null && reading.fiveHourResetsAt.getTime() <= now.getTime());
+
 export function planView(reading: PlanReading | null, guardPct: number, now: Date, override = false): PlanView {
+  const stale = readingStale(reading, now);
+  const weekGone = reading?.sevenDayResetsAt != null && reading.sevenDayResetsAt.getTime() <= now.getTime();
   const base = {
-    five_hour_pct: reading?.fiveHourPct ?? null,
-    seven_day_pct: reading?.sevenDayPct ?? null,
+    five_hour_pct: stale ? null : (reading?.fiveHourPct ?? null),
+    seven_day_pct: weekGone ? null : (reading?.sevenDayPct ?? null),
     resets_at: reading?.fiveHourResetsAt?.toISOString() ?? null,
     seven_day_resets_at: reading?.sevenDayResetsAt?.toISOString() ?? null,
     guard_pct: guardPct,
@@ -181,12 +196,10 @@ export function planView(reading: PlanReading | null, guardPct: number, now: Dat
     override,
   };
   // PLA-25: with the switch on only a real "rejected" stops (the run would fail anyway).
-  if (override) return { ...base, state: reading?.status === "rejected" ? "stopped" : "ok" };
-  if (!reading) return { ...base, state: "unknown" };
-  const stale =
-    now.getTime() - reading.at.getTime() > READING_TTL_MS ||
-    (reading.fiveHourResetsAt != null && reading.fiveHourResetsAt.getTime() <= now.getTime());
-  if (stale) return { ...base, state: "unknown" };
+  // PLA-56: and only while it is still true: its five-hour reset is ahead, or (with no reset time) it is fresh.
+  // An old "rejected" stopped every run for hours after its reset, and with no run no new reading ever came.
+  if (override) return { ...base, state: reading?.status === "rejected" && rejectedStillHolds(reading, now) ? "stopped" : "ok" };
+  if (!reading || stale) return { ...base, state: "unknown" };
   if (reading.status === "allowed_warning" || reading.status === "rejected") return { ...base, state: "stopped" };
   if (reading.fiveHourPct == null) return { ...base, state: "unknown" };
   if (reading.fiveHourPct >= guardPct) return { ...base, state: "stopped" };

@@ -1,4 +1,5 @@
-import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { killTree } from "../lib/proc-tree.js";
 
 // `gh auth token` on a Mac reads the login keychain through `security`. A timeout on `gh` kills
 // that process and leaves `security` waiting on the dialog; the next tick then starts another.
@@ -20,15 +21,8 @@ const DEFAULT_MAX_BUFFER = 1024 * 1024;
 
 function killGroup(pid: number | undefined): void {
   if (!pid || pid <= 0) return;
-  // Windows has no process groups to signal: taskkill /T ends the child and everything it started.
-  if (process.platform === "win32") {
-    try {
-      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-    } catch {
-      // taskkill is missing or refused. The caller still reports timeout or overflow.
-    }
-    return;
-  }
+  // PLA-I2-19 (audit B5): Windows has no process groups; taskkill /T takes the tree.
+  if (process.platform === "win32") return killTree(pid, "SIGKILL");
   try {
     process.kill(-pid, "SIGKILL");
   } catch (err) {

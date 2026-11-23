@@ -4,12 +4,15 @@ import type { Db } from "../db/client.js";
 import { ADAPTERS, type AdapterConfig, type AdapterName, type RunTrigger } from "../db/schema.js";
 import { spawn, type SpawnDeps, type SpawnTask } from "../adapters/index.js";
 import { requeueHeld, sweepFailedRuns, sweepStoppedRuns } from "../runner/failed.js";
+import { sweepTouched } from "../runner/touched.js";
 import { COMPANY } from "../runner/limits.js";
 import { sweepAutoAccept } from "../api/auto-accept.js";
 import { sweepQa } from "../runner/qa.js";
-import { cleanupWorktrees, drainQueue, enforceLive, pruneRunLogs, runLogDir, slotReservation, wakeClaude, type RunnerDeps } from "../runner/runner.js";
+import { cleanupWorktrees, drainQueue, prewarmQueued, enforceLive, pruneRunLogs, runLogDir, slotReservation, wakeClaude, type RunnerDeps } from "../runner/runner.js";
 import { writeLockStats } from "../mcp/tx.js";
 import { ToolError } from "../mcp/errors.js";
+import { ST } from "../state/status.js";
+import { workable } from "../state/workable.js";
 import { iso } from "../mcp/tx.js";
 import { storeOf, readerOf } from "../store/port.js";
 import type { NewRow } from "../store/types.js";
@@ -49,7 +52,7 @@ export type ReadyWork = {
   ownerAgent: string | null;
   // PLA-I29-10: the project's runs_paused switch. A paused project offers no work to anyone.
   paused?: boolean;
-  // PLA-I36-6: Jorge picked this ticket to go first in its project (settings.next_first).
+  // PLA-I36-6: the owner picked this ticket to go first in its project (settings.next_first).
   first?: boolean;
 };
 
@@ -133,7 +136,10 @@ export const loadReady = async (db: Db): Promise<ReadyWork[]> => {
   const r = readerOf(db);
   const live = new Map((await r.find("projects", { runsPaused: false })).map((p) => [p.id, p]));
   if (!live.size) return [];
-  const rows = await r.find("tasks", { projectId: [...live.keys()], kind: "ticket", status: "Ready" });
+  // PLA-165, PLA-I74-4: ready means startable, by the one workable rule (src/state/workable.ts): no blocker that does
+  // not hold, not a step of an initiative the owner put On hold, not a ticket a person owns (the owner's own steps),
+  // no live lease. A Taller start on one of those was picked here and refused by claim (NOT_CLAIMABLE).
+  const rows = await workable(r, await r.find("tasks", { projectId: [...live.keys()], kind: "ticket", status: ST.ready }));
   return rows.map((t) => {
     const p = live.get(t.projectId)!;
     return {
@@ -175,7 +181,7 @@ const explicitTask = async (db: Db, agentId: string, taskKey: string): Promise<R
   if (found.length === 0) throw new ToolError("TASK_NOT_FOUND", { key });
   if (found.length > 1) throw new ToolError("INVALID_FILTER", { field: "task_key", hint: "key is in more than one project" });
   const task = found[0]!;
-  if (task.kind !== "ticket" || task.status !== "Ready") throw new ToolError("INVALID_FILTER", { field: "task_key", hint: "not Ready" });
+  if (task.kind !== "ticket" || task.status !== ST.ready) throw new ToolError("INVALID_FILTER", { field: "task_key", hint: "not Ready" });
   if (task.ownerAgent && task.ownerAgent !== agentId) throw new ToolError("INVALID_FILTER", { field: "task_key", hint: "owned by another agent" });
   const project = (await r.get("projects", { id: task.projectId }))!;
   return {
@@ -284,7 +290,7 @@ export const runHeartbeat = async (db: Db, now = new Date(), deps?: HeartbeatDep
   // PLA-I29: switches stop live runs first, then queued runs take free slots.
   const stopped = await enforceLive(db, now);
   // PLA-16: a run that failed holding its ticket is retried once (queued here, started by the drain below),
-  // or its ticket is handed to Jorge after a second failure in a row.
+  // or its ticket is handed to the owner after a second failure in a row.
   const failed = await sweepFailedRuns(db);
   // PLA-18: a run a limit stopped lets go of its ticket, and work a limit held is queued again once the
   // runner's checks say it would start.
@@ -302,7 +308,11 @@ export const runHeartbeat = async (db: Db, now = new Date(), deps?: HeartbeatDep
   await retryConsultas(db, now).catch(() => 0);
   // PLA-I60-4: an idea in a stage nobody has worked on since it got there gets one retry run.
   const stalled = await sweepStalledIdeas(db, now).catch(() => 0);
+  // PLA-58: what each live Taller run really changed joins its ticket's areas, before the drain admits anything.
+  const touched = await sweepTouched(db, { git: deps?.runner?.git }).catch(logged("touched sweep"));
   const drained = await drainQueue(db, now, deps?.runner);
+  // PLA-I73-4: steps still waiting for a slot get their worktree ready now.
+  await prewarmQueued(db, deps?.runner ?? {}).catch(logged("prewarm"));
   const cleaned = await cleanupWorktrees(db, deps?.runner);
   // PLA-I60-6: run-log retention, and the write lock's timings kept for Máquina's diagnostics.
   const pruned = pruneRunLogs(runLogDir(deps?.runner ?? {}), now);
@@ -326,7 +336,7 @@ export const runHeartbeat = async (db: Db, now = new Date(), deps?: HeartbeatDep
     worktrees_removed: cleaned,
     logs_pruned: pruned,
     retried_after_fail: failed.retried,
-    handed_to_jorge: failed.held,
+    handed_to_owner: failed.held,
     freed_after_stop: freed.freed,
     requeued_held: held.requeued,
     stalled_ideas: stalled,
@@ -335,6 +345,7 @@ export const runHeartbeat = async (db: Db, now = new Date(), deps?: HeartbeatDep
     qa_concluded: qa?.concluded ?? 0,
     fotos_restarted: fotos?.restarted ?? 0,
     fotos_opened: fotos?.opened ?? 0,
+    areas_touched: touched?.grown ?? 0,
     reserved: 0,
   };
   // PLA-I41-3: while the Morning brief holds the slot, no agent is woken (cadences stay due for the next tick).

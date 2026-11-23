@@ -77,6 +77,17 @@ describe("devva backup", () => {
     assert.equal(state.engine_dump, null, "no engine export without its folder");
   });
 
+  test("PLA-I2-8: the update's backup reads the store fresh from the engine and writes the same checked dump", async () => {
+    const { dumpStore } = await import("../src/jobs/backup.js");
+    const { readDump } = await import("../src/update/restore.js");
+    const file = path.join(dir, "plania-pre-update-1.0.0-to-1.1.0-x.devva.jsonl.gz");
+    // The update command is another process: a store of its own on the same lobes, which sees every commit made so far.
+    await store.write("", {}, (uow) => uow.insert("machineState", { key: "b", value: { n: 3 } }));
+    await dumpStore({ prefix: `bk_${stamp}` }, file);
+    assert.equal(readDump(file)!.commits, store.commits);
+    assert.equal(gunzipSync(readFileSync(file)).toString("utf8"), await store.dump());
+  });
+
   // The engine writes its export under its own data directory. PLANIA_DEVVA_DUMP_DIR is the host folder that
   // directory's meta/dumps is mounted on; without the mount the file cannot be seen from here.
   const engineDir = process.env.PLANIA_DEVVA_DUMP_DIR;

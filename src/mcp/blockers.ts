@@ -3,13 +3,21 @@ import type { Actor, Task } from "../db/schema.js";
 import { readerOf, uowOf } from "../store/port.js";
 import type { Reader, Row } from "../store/types.js";
 import { ToolError } from "./errors.js";
-import { isGating } from "./jorge-lines.js";
+import { isGating } from "./owner-lines.js";
 import { SYSTEM_ACTOR, iso, type Emit, type Q } from "./tx.js";
+import { neutralAssignee } from "../owner.js";
+import { defineWords, say } from "../words.js";
+
+// PLA-I2-10: the note on a chain step that moved to Ready by itself, in the install's language; the Spanish is unchanged.
+export const BLOCKER_WORDS = defineWords({
+  es: { promoted: (keys: string) => `Pasa a Lista sola: ${keys} ya entró (PLA-54).` },
+  en: { promoted: (keys: string) => `Moves to Ready by itself: ${keys} is in (PLA-54).` },
+});
 
 // blocked_by: a ticket (a key, or {task}) that must reach In review or later, or a typed blocker
 // the server evaluates (R-15):
 //   {env, condition, value}            contains_commit <sha> | migration_gte <n> | deployed_after [ISO]
-//   {human_action: {assignee, text}}   cleared by Jorge from the inbox
+//   {human_action: {assignee, text}}   cleared by the owner from the inbox
 //   {env_flag: {env, flag, equals}}    a flag set with set_env
 //   {time_after: ISO}                  the clock
 //   {metric_gte: {name, value}}        a metric reported with set_metric or on a result
@@ -61,7 +69,7 @@ function typedBlocker(b: Exclude<BlockerInput, string | { task: string } | { env
   const bad = (type: string, hint: string) => new ToolError("INVALID_BLOCKER", { type, hint });
   if ("human_action" in b) {
     const text = b.human_action?.text?.trim();
-    if (!text) throw bad("human_action", "text says what Jorge has to do");
+    if (!text) throw bad("human_action", "text says what the owner has to do");
     // A file the session may not write (e.g. .env.example): the lines go with it, and Compañía commits them to the PR.
     const file = b.human_action.file;
     if (file && (typeof file.path !== "string" || !file.path.trim() || typeof file.append !== "string" || !file.append.trim()))
@@ -69,7 +77,7 @@ function typedBlocker(b: Exclude<BlockerInput, string | { task: string } | { env
     return {
       type: "human_action",
       spec: {
-        assignee: b.human_action.assignee?.trim() || "jorge",
+        assignee: neutralAssignee(b.human_action.assignee).assignee,
         text,
         ...(b.human_action.before_release ? { before_release: true } : {}),
         ...(file ? { file: { path: file.path.trim(), append: file.append } } : {}),
@@ -130,7 +138,7 @@ export async function replaceBlockers(tx: Q, taskId: string, blockerIds: string[
   const uow = uowOf(tx);
   await uow.delete("taskBlockers", { taskId });
   // A human action already cleared stays cleared when the same list is written again.
-  // 2.10: blockers parsed from a "Jorge:" line belong to their text, not to blocked_by: they stay, and
+  // 2.10: blockers parsed from an "Owner:" line belong to their text, not to blocked_by: they stay, and
   // a human action in the list with the same text as one of them is not written twice.
   const existing = await uow.find("blockers", { taskId });
   const parsedTexts = new Set(existing.filter((e) => e.spec.source === "parsed").map((e) => String(e.spec.text)));
@@ -332,7 +340,12 @@ export async function promoteUnblocked(tx: Q, emit: Emit, projectId: string): Pr
 // stays put), its initiative is building (Active or Shipping), it waits on at least one ticket, every ticket it
 // waits on has landed (Merged, Released or Done: its code is in the branch), and no other blocker holds.
 // The move to Ready wakes Taller like any move (src/runner/events.ts).
+// PLA-I73-2 (stacked steps): with settings.velocidad.apilar on (the default), one blocker that is In review with a
+// branch counts too. The step then starts on top of that branch (src/runner/stack.ts), so Taller builds while the
+// previous step waits for its photos and the owner; it is accepted only after the one under it (stackHold).
 const CHAIN_LANDED = ["Merged", "Released", "Done"];
+// apilar is on unless the project's settings say false (a missing project or setting is the default, on).
+const apilarOn = (p: { settings: { velocidad?: { apilar?: unknown } } } | undefined) => String(p?.settings?.velocidad?.apilar ?? "true") !== "false";
 // tasks: the candidates (any projects). Returns each one that should move, with the keys it waited on in key order.
 async function chainedReady(r: Reader, candidates: Task[], now: Date): Promise<{ task: Task; waited: string[] }[]> {
   const steps = candidates.filter((t) => t.kind === "ticket" && t.status === "Backlog" && t.statusChangedAt === null && t.parentId !== null);
@@ -342,11 +355,16 @@ async function chainedReady(r: Reader, candidates: Task[], now: Date): Promise<{
   if (!building.length) return [];
   const links = await r.find("taskBlockers", { taskId: building.map((t) => t.id) });
   const blockerTask = new Map((links.length ? await r.find("tasks", { id: [...new Set(links.map((l) => l.blockerId))] }, { orderBy: [{ column: "key" }] }) : []).map((b) => [b.id, b]));
+  const projectRows = new Map((await r.find("projects", { id: [...new Set(building.map((t) => t.projectId))] })).map((p) => [p.id, p]));
   const out: { task: Task; waited: string[] }[] = [];
   const unsatisfied = new Map<string, Set<string>>();
   for (const t of building) {
     const on = links.filter((l) => l.taskId === t.id).map((l) => blockerTask.get(l.blockerId));
-    if (!on.length || on.some((b) => !b || !CHAIN_LANDED.includes(b.status))) continue;
+    if (!on.length || on.some((b) => !b)) continue;
+    // At most one blocker that has not landed, and that one In review with a branch while apilar is on.
+    const pending = on.filter((b) => !CHAIN_LANDED.includes(b!.status));
+    if (pending.length > 1) continue;
+    if (pending.some((b) => !(b!.status === "In review" && b!.branch !== null && apilarOn(projectRows.get(t.projectId))))) continue;
     if (!unsatisfied.has(t.projectId)) {
       unsatisfied.set(t.projectId, await blockedTaskIds(r, t.projectId, building.filter((x) => x.projectId === t.projectId).map((x) => x.id), now));
     }
@@ -367,7 +385,7 @@ export async function promoteChained(tx: Q, emit: Emit, projectId: string): Prom
     const [u] = await uow.update("tasks", { id: task.id, status: "Backlog" }, { status: "Ready", statusChangedAt: uow.now, version: cur.version + 1, updatedAt: uow.now });
     if (!u) continue;
     await emit("task.status", u, { from: "Backlog", to: "Ready", unblocked_by: waited }, SYSTEM_ACTOR);
-    await emit("note", u, { text: `Pasa a Lista sola: ${waited.join(", ")} ya entró (PLA-54).` }, SYSTEM_ACTOR);
+    await emit("note", u, { text: say(BLOCKER_WORDS).promoted(waited.join(", ")) }, SYSTEM_ACTOR);
     promoted.push(u.key);
   }
   return promoted;
@@ -385,7 +403,7 @@ export async function projectsWithChainedReady(tx: Q, now = new Date()): Promise
 // a row, and anything else is "not found" rather than a uuid parse error.
 export const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-// Jorge resolves a human action (the inbox); the ticket may move to Ready right away.
+// The owner resolves a human action (the inbox); the ticket may move to Ready right away.
 export async function resolveHumanAction(tx: Q, emit: Emit, projectId: string, blockerId: string, by: Actor, note?: string) {
   const uow = uowOf(tx);
   const row = typeof blockerId === "string" && UUID_TEXT.test(blockerId) ? await uow.get("blockers", { id: blockerId, type: "human_action" }) : undefined;
@@ -396,13 +414,13 @@ export async function resolveHumanAction(tx: Q, emit: Emit, projectId: string, b
     await uow.update("blockers", { id: b.b.id }, { satisfiedAt: uow.now, satisfiedBy: by });
     await emit("blocker.resolved", { id: b.taskId, key: b.taskKey }, { blocker_id: b.b.id, text: (b.b.spec as { text: string }).text });
   }
-  // 2.10: what Jorge says about it lands in the ticket's log as his note.
+  // 2.10: what the owner says about it lands in the ticket's log as his note.
   if (note?.trim()) await emit("note", { id: b.taskId, key: b.taskKey }, { text: note.trim(), blocker_id: b.b.id }, by);
   await promoteUnblocked(tx, emit, projectId);
   return { blocker_id: b.b.id, key: b.taskKey };
 }
 
-// Human actions waiting on Jorge, for the inbox.
+// Human actions waiting on the owner, for the inbox.
 export async function openHumanActions(db: Q, projectId: string) {
   const r = readerOf(db);
   const open = new Map((await r.find("tasks", { projectId })).filter((t) => t.status !== "Done" && t.status !== "Won't do").map((t) => [t.id, t]));

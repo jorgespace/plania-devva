@@ -1,7 +1,7 @@
 // PLA-I60-5: what Motores shows about «a la vez» for one project, read-only.
 //   limits   the project's «Agentes a la vez», «Preguntas a la vez», «Por agente» (projects.settings.runner)
 //   live     runs live now in its work lane and its question lane
-//   ceiling  the company's «Tope de la Mac», runs live on the whole Mac (other projects included), slots reserved
+//   ceiling  the company's «Tope de la máquina», runs live on the whole Mac (other projects included), slots reserved
 //            (the Morning brief) and this worker's capacity («memoria para ~N»)
 //   plan     the last 5-hour reading, the guard, and the plan weight per run, so the screen can show what the
 //            queued runs that fit would add (the same weights admission uses, src/runner/admission.ts)
@@ -33,7 +33,7 @@ export type RunnerView = {
   limits: { max_concurrent: number; consulta_slots: number; max_per_agent: number; serialize_areas: boolean };
   live: { work: number; consulta: number };
   ceiling: { max: number; live: number; live_other_projects: number; reserved: number; capacity: number };
-  plan: { pct: number | null; guard: number; state: string; override: boolean; est_pct: number; live_weight: number };
+  plan: { pct: number | null; read_at: string | null; guard: number; state: string; override: boolean; est_pct: number; live_weight: number };
   queue: RunnerQueued[];
   seats: RunnerSeat[];
 };
@@ -93,7 +93,7 @@ export async function runnerView(db: Db, p: Pick<Project, "id" | "settings">, no
     limits: { max_concurrent: limits.maxConcurrent, consulta_slots: limits.consultaSlots, max_per_agent: limits.maxPerAgent, serialize_areas: limits.serializeAreas },
     live: { work: liveRows.filter((x) => x.run.lane === "work" && x.agentProject).length, consulta: liveRows.filter((x) => x.run.lane === "consulta").length },
     ceiling: { max: settings.maxConcurrent, live: all.n, live_other_projects: all.n - all.here, reserved, capacity: workerCapacity() },
-    plan: { pct: view.five_hour_pct, guard: view.guard_pct, state: view.state, override: view.override, est_pct: settings.estPctPerRun, live_weight: Math.round(liveWeight * 100) / 100 },
+    plan: { pct: view.five_hour_pct, read_at: view.read_at, guard: view.guard_pct, state: view.state, override: view.override, est_pct: settings.estPctPerRun, live_weight: Math.round(liveWeight * 100) / 100 },
     queue: rows
       .filter((x) => x.run.status === "queued")
       .map((x) => ({

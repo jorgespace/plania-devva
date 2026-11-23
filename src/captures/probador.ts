@@ -1,5 +1,5 @@
 // PLA-I52-3: antes y después. When a delivery with a muestra lands, Plania runs sandbox (antes) and the delivery's
-// copy (después) side by side, photographs every view of the muestra at 1280 and 390 on both, marks a path that did
+// copy (después) side by side, photographs every view of the muestra at 1440 and 390 on both, marks a path that did
 // not exist before as new, and boxes what changed. Only then is the delivery the owner's turn (probadorGate).
 // If no picture of the delivery can be taken, the ticket goes back to Taller with the reason; after the second
 // failure the card is raised anyway, with what Plania has and why the rest is missing. Nobody is shown a blind card.
@@ -10,16 +10,66 @@ import { ToolError } from "../mcp/errors.js";
 import type { Ctx } from "../mcp/tx.js";
 import { setTask } from "../mcp/writes.js";
 import { enqueueWake } from "../runner/events.js";
+import { supported } from "../lib/system-support.js";
 import { writeVia } from "../runner/limits.js";
 import { readerOf } from "../store/port.js";
-import { notNull } from "../store/types.js";
+import { ne, notNull } from "../store/types.js";
 import { pngDiff, type DiffBox } from "./diff.js";
 import type { Muestra } from "./muestra.js";
-import { encender, encenderEntrega, entregaRead, pruebaInfo, pruebaOf, pruebaRead, BRANCH } from "./prueba.js";
+import { caseViews, emptyCases } from "./vacios.js";
+import { measuredWaits } from "./waits.js";
+import { apagar, apagarEntrega, cargarDatos, datosDe, encender, encenderEntrega, entregaEnv, entregaRead, hashDatos, pruebaEnv, pruebaInfo, pruebaOf, pruebaRead, BRANCH } from "./prueba.js";
 import { runCapture, type CaptureInput, type CaptureSummary, type ViewPage } from "./run.js";
 import { imageUrl, newestFirst, readFile } from "./store.js";
 import { linksTicket, preguntasOf, type QA } from "./preguntas.js";
 import { VIEWPORT_NAMES, type ViewportName } from "./settings.js";
+import { SISTEMA } from "../../ui/src/lib/sistema.js";
+import { defineWords, say } from "../words.js";
+
+// PLA-I2-10: why pictures are missing, the note back to Taller and the card's hold, in the install's language; the
+// Spanish is unchanged.
+export const PROBADOR_WORDS = defineWords({
+  es: {
+    planiaFailed: (why: string) => `Plania falló al tomar las fotos: ${why}`,
+    noBranch: "La entrega no tiene rama: no hay fotos",
+    noStart: (why: string) => `No se pudo encender la copia de la entrega: ${why}`,
+    late: "La copia de la entrega no arrancó a tiempo",
+    noDatos: (why: string) => `Los datos de la muestra no se cargaron: ${why}`,
+    before: (why: string) => `Antes: ${why}`,
+    noBefore: "Sin antes: la copia de prueba no arrancó",
+    noShoot: (why: string) => `No se pudo fotografiar la entrega: ${why}`,
+    noView: "ninguna vista salió",
+    noPicture: (why: string) => `No salió ninguna foto de la entrega: ${why}`,
+    someMissing: (n: number, of: number, why: string | undefined) => `${n} de ${of} fotos no salieron (${why})`,
+    returned: (error: string) => `Plania no pudo fotografiar la entrega para El Probador: ${error}. Revisa la muestra (rutas, sesión, acciones) o que la app arranque, y vuelve a entregar.`,
+    olderCommit: (sha: string) => `Las fotos son de un commit anterior (${sha})`,
+    unavailable: (what: string) => `Fotos: ${what}`,
+    missing: (why: string) => `Faltan fotos: ${why}`,
+    waitLane: "Espera a que terminen las fotos de otra entrega.",
+    closingLive: "Cierra la copia en vivo de otra entrega que quedó abierta.",
+    wrongPage: (why: string) => `No se puede aprobar todavía. ${why}. Hay que corregir la muestra o la pantalla y volver a tomar las fotos.`,
+  },
+  en: {
+    planiaFailed: (why: string) => `Plania failed while taking the pictures: ${why}`,
+    noBranch: "The delivery has no branch: no pictures",
+    noStart: (why: string) => `Could not turn on the delivery's copy: ${why}`,
+    late: "The delivery's copy did not start in time",
+    noDatos: (why: string) => `The preview's data did not load: ${why}`,
+    before: (why: string) => `Before: ${why}`,
+    noBefore: "No before: the test copy did not start",
+    noShoot: (why: string) => `Could not photograph the delivery: ${why}`,
+    noView: "no view came out",
+    noPicture: (why: string) => `No picture of the delivery came out: ${why}`,
+    someMissing: (n: number, of: number, why: string | undefined) => `${n} of ${of} pictures did not come out (${why})`,
+    returned: (error: string) => `Plania could not photograph the delivery for El Probador: ${error}. Check the preview (paths, session, actions) or that the app starts, and deliver again.`,
+    olderCommit: (sha: string) => `The pictures are of an earlier commit (${sha})`,
+    unavailable: (what: string) => `Pictures: ${what}`,
+    missing: (why: string) => `Pictures missing: ${why}`,
+    waitLane: "Waits for another delivery's pictures to finish.",
+    closingLive: "Closing another delivery's live copy that was left open.",
+    wrongPage: (why: string) => `It cannot be approved yet. ${why}. The preview or the screen needs fixing and the pictures taking again.`,
+  },
+});
 
 export type ProbadorState = {
   state: "tomando" | "lista" | "fallo";
@@ -29,12 +79,20 @@ export type ProbadorState = {
   at: string;
   // PLA-52: the PR head the sweep asked a retake for; a second mismatch on the same head opens the card with the reason.
   for_head?: string | null;
+  // PLA-158 (F-27): what a pass in «tomando» waits on (another pass on the project's lane, the delivery copy held by
+  // another delivery), in the owner's words; null while it works. The card and the board line show it.
+  waiting?: string | null;
+  // PLA-I74-10: a photo landed on another page than its view declares. error says which, in the owner's words, and
+  // it holds «Aceptar» back (the card and the server's accept).
+  wrong?: boolean;
 };
 
 export type ProbadorDeps = {
   capture?: (db: Db, input: CaptureInput) => Promise<CaptureSummary>;
   encender?: typeof encender;
   encenderEntrega?: typeof encenderEntrega;
+  cargarDatos?: typeof cargarDatos; // PLA-78
+  apagarEntrega?: typeof apagarEntrega; // PLA-158
   waitMs?: number;
   pollMs?: number;
   returnToTaller?: boolean; // false: tests that only look at the state
@@ -51,11 +109,36 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const running = new Set<string>(); // project/key: one pass at a time per delivery
 
+// PLA-106 (guided test PLA-86, F-34): a project has one delivery copy, but passes were only kept apart per delivery.
+// Two deliveries landing together (MIA-40 and MIA-I10-5) used the copy at once: one rebuilt its database and loaded its
+// rows while the other was mid-pass, and the second load failed with a duplicate key. Passes of one project now wait
+// their turn on that project's lane; another project's never waits.
+const lanes = new Map<string, Promise<unknown>>();
+export const laneBusy = (slug: string): boolean => lanes.has(slug);
+export function onLane<T>(slug: string, work: () => Promise<T>): Promise<T> {
+  const before = lanes.get(slug) ?? Promise.resolve();
+  const mine = before.catch(() => undefined).then(work);
+  const tail = mine.catch(() => undefined);
+  lanes.set(slug, tail);
+  void tail.then(() => {
+    if (lanes.get(slug) === tail) lanes.delete(slug);
+  });
+  return mine;
+}
+
 async function load(db: Db, slug: string, key: string): Promise<{ p: Project; t: Task } | null> {
   const p = await readerOf(db).get("projects", { slug });
   if (!p) return null;
   const t = await readerOf(db).get("tasks", { projectId: p.id, key });
   return t ? { p, t } : null;
+}
+
+// PLA-I73-1: a pass's start and end are events, so the initiative's stopwatch reads photo time from its own records
+// (until now only the server log had it). The end carries each phase's seconds.
+async function passEvent(db: Db, t: Pick<Task, "id" | "key" | "projectId">, type: "probador.started" | "probador.pass", payload: Record<string, unknown>): Promise<void> {
+  await writeVia(db, (uow) => uow.insert("events", { projectId: t.projectId, taskId: t.id, taskKey: t.key, type, actor: ctx().actor, payload }), t.projectId).catch((e) =>
+    console.log(`[probador] ${t.key}: could not record ${type}: ${short(e)}`),
+  );
 }
 
 async function setState(db: Db, t: Task, s: Omit<ProbadorState, "at">): Promise<ProbadorState> {
@@ -71,23 +154,33 @@ async function setState(db: Db, t: Task, s: Omit<ProbadorState, "at">): Promise<
 }
 
 export const viewsOf = (m: Muestra): ViewPage[] =>
-  m.vistas.map((v) => ({ key: v.key, label: v.label, path: v.path, ...(v.session ? { session: true } : {}), ...(v.follow ? { follow: v.follow } : {}), ...(v.acciones ? { acciones: v.acciones } : {}) }));
+  m.vistas.map((v) => ({ key: v.key, label: v.label, path: v.path, ...(v.session ? { session: true } : {}), ...(v.follow ? { follow: v.follow } : {}), ...(v.acciones ? { acciones: v.acciones } : {}), ...(v.url ? { url: v.url } : {}) }));
 
 // Takes the delivery's pairs. Returns the new state, or null when there is nothing to show (no capture settings,
 // no muestra, no branch). Never throws for a picture problem: that is the state's error.
 export async function probar(db: Db, slug: string, key: string, deps: ProbadorDeps = {}): Promise<ProbadorState | null> {
   const id = `${slug}/${key}`;
   if (running.has(id)) return null;
+  // PLA-I2-4: nothing to photograph with here (probadorGate says so on the card).
+  if (!supported("stills") || !supported("test_copy")) return null;
   running.add(id);
   try {
-    return await pass(db, slug, key, deps);
+    // PLA-158 (F-27): a pass behind another one of the same project says so on its card instead of a bare «tomando».
+    if (laneBusy(slug)) {
+      const got = await load(db, slug, key);
+      if (got?.t.muestra && got.p.settings.capture) {
+        const s = got.t.probador;
+        await setState(db, got.t, { state: "tomando", attempts: s?.attempts ?? 0, error: null, commit: s?.commit ?? null, for_head: deps.forHead ?? s?.for_head ?? null, waiting: say(PROBADOR_WORDS).waitLane });
+      }
+    }
+    return await onLane(slug, () => pass(db, slug, key, deps));
   } catch (e) {
     // PLA-52: never left «tomando». An error of Plania's own is not Taller's to fix: the sweep tries once more, then
     // the card shows with the reason.
     console.log(`[probador] ${id} failed: ${short(e)}`);
     const got = await load(db, slug, key).catch(() => null);
     if (!got) return null;
-    return failed(db, got.p, got.t, got.t.probador?.attempts ?? 0, `Plania falló al tomar las fotos: ${short(e)}`, { ...deps, returnToTaller: false }).catch((e2) => {
+    return failed(db, got.p, got.t, got.t.probador?.attempts ?? 0, say(PROBADOR_WORDS).planiaFailed(short(e)), { ...deps, returnToTaller: false }).catch((e2) => {
       console.log(`[probador] ${id} could not record the failure: ${short(e2)}`);
       return null;
     });
@@ -107,20 +200,50 @@ async function pass(db: Db, slug: string, key: string, deps: ProbadorDeps): Prom
   if (!settings || !t.muestra) return null;
   const attempts = t.probador?.attempts ?? 0;
   // PLA-52: a delivery with no branch cannot be photographed; the card shows with the reason instead of waiting forever.
-  if (!branch) return setState(db, t, { state: "lista", attempts, error: "La entrega no tiene rama: no hay fotos", commit: null });
-  await setState(db, t, { state: "tomando", attempts, error: null, commit: t.probador?.commit ?? null, for_head: deps.forHead ?? t.probador?.for_head ?? null });
+  if (!branch) return setState(db, t, { state: "lista", attempts, error: say(PROBADOR_WORDS).noBranch, commit: null });
+  await setState(db, t, { state: "tomando", attempts, error: null, commit: t.probador?.commit ?? null, for_head: deps.forHead ?? t.probador?.for_head ?? null, waiting: null });
+  await passEvent(db, t, "probador.started", { attempts });
+  // PLA-110 (guided test PLA-86, F-40): passes took 10–20 minutes and the log could not say where. Each phase's
+  // seconds go to the server log at the end, so a slow pass shows its own breakdown.
+  const clock = Date.now();
+  const lap: string[] = [];
+  const mark = (what: string) => lap.push(`${what} ${Math.round((Date.now() - clock) / 1000)}s`);
 
   // Both copies, then wait until each answers (or fails).
   const startSandbox = deps.encender ?? encender;
   const startEntrega = deps.encenderEntrega ?? encenderEntrega;
-  const outside = !pruebaOf(slug) && (await pruebaRead(slug, settings)).phase === "running";
-  if (!outside) await startSandbox(db, slug).catch(() => null);
-  try {
-    await startEntrega(db, slug, { key: t.key, branch });
-  } catch (e) {
-    return failed(db, p, t, attempts, `No se pudo encender la copia de la entrega: ${short(e)}`, deps);
+  // PLA-154 (guided test 3): «outside» means the app's own dev server answers on settings.port. After a restart reaped
+  // the sandbox copy, Plania's own delivery copy was on that port and was photographed as «antes»: every view IGUAL,
+  // and the card blamed Taller. A port one of Plania's copies holds is never outside.
+  const ownPort = entregaRead(slug)?.port ?? null;
+  const outside = !pruebaOf(slug) && ownPort !== settings.port && (await pruebaRead(slug, settings)).phase === "running";
+  // PLA-78: a copy whose database carries another muestra's fake rows starts again on a fresh copy, so one
+  // delivery's rows never show in another's pictures.
+  const want = hashDatos(t.muestra.datos);
+  const sbDatos = datosDe(slug, "sandbox");
+  if (!outside && sbDatos && sbDatos !== want) await apagar(db, slug).catch(() => null);
+  // PLA-158 (F-27): one delivery copy per project. When it holds another delivery (the live copy the owner opened for
+  // it and left open), the new delivery wins: that copy closes now and the owner can open the live view again. The
+  // card says what the pass is doing meanwhile.
+  const held = entregaRead(slug);
+  if (held?.key && held.key !== t.key) {
+    const state = { state: "tomando" as const, attempts, error: null, commit: t.probador?.commit ?? null, for_head: deps.forHead ?? t.probador?.for_head ?? null };
+    await setState(db, t, { ...state, waiting: say(PROBADOR_WORDS).closingLive });
+    await (deps.apagarEntrega ?? apagarEntrega)(db, slug).catch(() => null);
+    await setState(db, t, { ...state, waiting: null });
   }
-  const until = Date.now() + (deps.waitMs ?? WAIT_MS);
+  // PLA-I74-10: Artist's empty states are photographed on a copy no muestra rows have touched yet.
+  const cases = await emptyCases(db, t);
+  const enDatos = datosDe(slug, "entrega");
+  if (enDatos && (enDatos !== want || cases.length)) await apagarEntrega(db, slug).catch(() => null);
+  if (!outside) await startSandbox(db, slug, { stills: false }).catch(() => null);
+  try {
+    await startEntrega(db, slug, { key: t.key, branch, head: deps.forHead ?? null });
+  } catch (e) {
+    return failed(db, p, t, attempts, say(PROBADOR_WORDS).noStart(short(e)), deps);
+  }
+  // PLA-I74-7: a slow project's copies get the time its check-up measured (and a minute to install and copy the base).
+  const until = Date.now() + (deps.waitMs ?? Math.max(WAIT_MS, (await measuredWaits(db, slug)).ready_ms + 60_000));
   const settled = (ph: string | undefined) => ph === "live" || ph === "failed";
   for (;;) {
     const e = entregaRead(slug);
@@ -130,8 +253,43 @@ async function pass(db: Db, slug: string, key: string, deps: ProbadorDeps): Prom
     await sleep(deps.pollMs ?? POLL_MS);
   }
   const e = entregaRead(slug);
-  if (!e || e.phase !== "live" || !e.port) return failed(db, p, t, attempts, e?.error ?? "La copia de la entrega no arrancó a tiempo", deps);
+  mark("copias");
+  if (!e || e.phase !== "live" || !e.port) return failed(db, p, t, attempts, e?.error ?? say(PROBADOR_WORDS).late, deps);
 
+  // PLA-I74-10: the empty-state cases, before any row is loaded: what the app's migrations and defaults leave.
+  let vacios: CaptureSummary | null = null;
+  if (cases.length) {
+    const capture = deps.capture ?? runCapture;
+    const sbLive = !outside && pruebaOf(slug)?.phase === "live" && !datosDe(slug, "sandbox");
+    const info = pruebaInfo(slug);
+    const sbPort = pruebaOf(slug)?.port;
+    if (sbLive && sbPort)
+      await capture(db, { project: slug, checkout: info?.worktree ?? e.worktree ?? "", base_url: `http://localhost:${sbPort}`, branch: info?.branch ?? BRANCH, commit: info?.commit ?? undefined, task_key: t.key, views: caseViews(cases), side: "antes", allow_missing: true, actor: ctx().actor, env: pruebaEnv(slug) }).catch(() => null);
+    vacios = await capture(db, { project: slug, checkout: e.worktree ?? "", base_url: `http://localhost:${e.port}`, branch, commit: e.commit ?? undefined, task_key: t.key, views: caseViews(cases), side: "despues", actor: ctx().actor, env: entregaEnv(slug) }).catch(() => null);
+    mark("vacios");
+  }
+
+  // PLA-78: the muestra's fake rows, in the delivery's database (a failure goes back to Taller: its SQL is wrong for
+  // its own branch) and in the test copy's (a failure there is fine: the rows may need the branch's new columns).
+  if (t.muestra.datos) {
+    const load = deps.cargarDatos ?? cargarDatos;
+    const d = await load(slug, "entrega", t.muestra.datos);
+    if (!d.ok) return failed(db, p, t, attempts, say(PROBADOR_WORDS).noDatos(d.error), deps);
+    if (!outside && pruebaOf(slug)?.phase === "live") {
+      const a = await load(slug, "sandbox", t.muestra.datos, { bestEffort: true });
+      if (!a.ok) console.log(`[probador] ${slug}/${t.key}: antes without the muestra's datos: ${a.error}`);
+      else if ("partial" in a && a.partial) console.log(`[probador] ${slug}/${t.key}: antes with the statements that fit sandbox (${a.partial})`);
+    }
+  }
+
+  // PLA-97 (guided test PLA-86, F-20): the rows the initiative's earlier accepted steps seeded (branch hours, advisors)
+  // were gone in every later step's copy. They load after this delivery's own, on both copies.
+  for (const sql of await earlierDatos(db, t)) {
+    const load = deps.cargarDatos ?? cargarDatos;
+    await load(slug, "entrega", sql, { earlier: true }).catch(() => null);
+    if (!outside && pruebaOf(slug)?.phase === "live") await load(slug, "sandbox", sql, { earlier: true }).catch(() => null);
+  }
+  mark("datos");
   const views = viewsOf(t.muestra);
   const capture = deps.capture ?? runCapture;
   const actor = ctx().actor;
@@ -140,25 +298,51 @@ async function pass(db: Db, slug: string, key: string, deps: ProbadorDeps): Prom
   let antesError: string | null = null;
   if (sb?.phase === "live" && sb.port) {
     const info = pruebaInfo(slug);
-    await capture(db, { project: slug, checkout: info?.worktree ?? e.worktree ?? "", base_url: `http://localhost:${sb.port}`, branch: BRANCH, commit: info?.commit ?? undefined, task_key: t.key, views, side: "antes", allow_missing: true, actor }).catch(
-      (err) => (antesError = `Antes: ${short(err)}`),
+    await capture(db, { project: slug, checkout: info?.worktree ?? e.worktree ?? "", base_url: `http://localhost:${sb.port}`, branch: info?.branch ?? BRANCH, commit: info?.commit ?? undefined, task_key: t.key, views, side: "antes", allow_missing: true, actor, env: pruebaEnv(slug) }).catch(
+      (err) => (antesError = say(PROBADOR_WORDS).before(short(err))),
     );
-  } else antesError = "Sin antes: la copia de prueba no arrancó";
+  } else antesError = say(PROBADOR_WORDS).noBefore;
+  mark("antes");
   // Después: the delivery.
   let despues: CaptureSummary | null = null;
   try {
-    despues = await capture(db, { project: slug, checkout: e.worktree ?? "", base_url: `http://localhost:${e.port}`, branch, commit: e.commit ?? undefined, task_key: t.key, views, side: "despues", actor });
+    despues = await capture(db, { project: slug, checkout: e.worktree ?? "", base_url: `http://localhost:${e.port}`, branch, commit: e.commit ?? undefined, task_key: t.key, views, side: "despues", actor, env: entregaEnv(slug) });
   } catch (err) {
-    return failed(db, p, t, attempts, `No se pudo fotografiar la entrega: ${short(err)}`, deps);
+    return failed(db, p, t, attempts, say(PROBADOR_WORDS).noShoot(short(err)), deps);
   }
+  mark("despues");
+  console.log(`[probador] ${slug}/${t.key}: ${lap.join(", ")}`);
+  await passEvent(db, t, "probador.pass", { ok: true, phases: lap });
   await markDiffs(db, p, t, despues.run_id);
+  if (vacios) {
+    await markDiffs(db, p, t, vacios.run_id);
+    despues = { ...despues, ok: despues.ok + vacios.ok, failed: despues.failed + vacios.failed, stills: [...despues.stills, ...vacios.stills] };
+  }
   if (despues.ok === 0) {
-    const why = despues.stills.find((x) => x.error)?.error ?? "ninguna vista salió";
-    return failed(db, p, t, attempts, `No salió ninguna foto de la entrega: ${why}`, deps);
+    const why = despues.stills.find((x) => x.error)?.error ?? say(PROBADOR_WORDS).noView;
+    const wrongAll = despues.stills.find((x) => x.wrong);
+    return failed(db, p, t, attempts, wrongAll ? say(PROBADOR_WORDS).wrongPage(wrongAll.error ?? "") : say(PROBADOR_WORDS).noPicture(why), deps, Boolean(wrongAll));
   }
   const missing = despues.stills.filter((x) => x.status === "error");
-  const error = [missing.length ? `${missing.length} de ${despues.stills.length} fotos no salieron (${missing[0]!.error})` : null, antesError].filter(Boolean).join(" · ") || null;
+  // PLA-I74-10: a wrong page says so first, and the card cannot be accepted until the delivery is photographed right.
+  const wrong = despues.stills.find((x) => x.wrong);
+  if (wrong) {
+    const error = say(PROBADOR_WORDS).wrongPage(wrong.error ?? "");
+    return setState(db, t, { state: "lista", attempts, error, commit: e.commit ?? null, for_head: deps.forHead ?? t.probador?.for_head ?? null, wrong: true });
+  }
+  const error = [missing.length ? say(PROBADOR_WORDS).someMissing(missing.length, despues.stills.length, missing[0]!.error) : null, antesError].filter(Boolean).join(" · ") || null;
   return setState(db, t, { state: "lista", attempts, error, commit: e.commit ?? null, for_head: deps.forHead ?? t.probador?.for_head ?? null });
+}
+
+/** PLA-97: the datos of the initiative's earlier accepted steps (Merged, Released or Done), in step order; none for a
+ * standalone ticket. PLA-I73-2: a step delivered and still In review counts too, since a stacked step carries its code. */
+export async function earlierDatos(db: Db, t: Pick<Task, "id" | "parentId" | "projectId">): Promise<string[]> {
+  if (!t.parentId) return [];
+  const rows = await readerOf(db).find("tasks", { projectId: t.projectId, parentId: t.parentId, id: ne(t.id), status: ["Merged", "Released", "Done", "In review"] });
+  return rows
+    .filter((r) => !!r.muestra?.datos?.trim())
+    .sort((a, b) => (a.phase ?? 999) - (b.phase ?? 999) || a.key.localeCompare(b.key, "en", { numeric: true }))
+    .map((r) => r.muestra!.datos!);
 }
 
 // The box on each después still against the newest antes of the same view and width.
@@ -179,16 +363,17 @@ async function markDiffs(db: Db, p: Project, t: Task, runId: string): Promise<vo
   }
 }
 
-async function failed(db: Db, p: Project, t: Task, attempts: number, error: string, deps: ProbadorDeps): Promise<ProbadorState> {
+async function failed(db: Db, p: Project, t: Task, attempts: number, error: string, deps: ProbadorDeps, wrong = false): Promise<ProbadorState> {
   const n = attempts + 1;
+  await passEvent(db, t, "probador.pass", { ok: false, error: error.slice(0, 300) });
   if (n >= MAX_ATTEMPTS) {
     // Second failure: the owner sees the card with what there is and why the rest is missing.
-    return setState(db, t, { state: "lista", attempts: n, error, commit: null });
+    return setState(db, t, { state: "lista", attempts: n, error, commit: null, ...(wrong ? { wrong: true } : {}) });
   }
   const state = await setState(db, t, { state: "fallo", attempts: n, error, commit: null });
   if (deps.returnToTaller !== false && !(await returnToTaller(db, p, t, error))) {
     // PLA-52: it could not go back to Taller: the owner sees the card with the reason, never a hidden delivery.
-    return setState(db, t, { state: "lista", attempts: n, error, commit: null });
+    return setState(db, t, { state: "lista", attempts: n, error, commit: null, ...(wrong ? { wrong: true } : {}) });
   }
   return state;
 }
@@ -197,7 +382,7 @@ async function failed(db: Db, p: Project, t: Task, attempts: number, error: stri
 async function returnToTaller(db: Db, p: Project, t0: Task, error: string): Promise<boolean> {
   const t = await readerOf(db).get("tasks", { id: t0.id });
   if (!t || t.status !== "In review") return true;
-  const text = `Plania no pudo fotografiar la entrega para El Probador: ${error}. Revisa la muestra (rutas, sesión, acciones) o que la app arranque, y vuelve a entregar.`.slice(0, 2000);
+  const text = say(PROBADOR_WORDS).returned(error).slice(0, 2000);
   try {
     await setTask(db, { project: p.slug, key: t.key, status: "Ready", version: t.version, note: text } as never, ctx());
   } catch (e) {
@@ -262,7 +447,7 @@ export async function sweepProbador(db: Db, now = new Date(), deps: ProbadorDeps
     if (!need || probando(p.slug) || started.has(p.slug)) continue;
     if (moved && s!.for_head && sameCommit(s!.for_head, head!)) {
       // Asked once for this head already and the copy still shows another commit: show what there is and say so.
-      await setState(db, t, { state: "lista", attempts: s!.attempts, error: `Las fotos son de un commit anterior (${s!.commit!.slice(0, 7)})`, commit: head, for_head: head });
+      await setState(db, t, { state: "lista", attempts: s!.attempts, error: say(PROBADOR_WORDS).olderCommit(s!.commit!.slice(0, 7)), commit: head, for_head: head });
       out.opened += 1;
       continue;
     }
@@ -287,9 +472,14 @@ const onScreen = (e: string) => e.replace(/copia de sandbox/g, "copia de prueba"
 export function probadorGate(p: Project | null, t: Task | null, head: string | null): ProbadorGate {
   if (!p?.settings.capture || !t?.muestra) return { pending: false, hold: null };
   const s = t.probador;
+  // PLA-I2-4: no pictures can come on a system without Chrome or a test copy, so the card never waits for them.
+  // A saved error still wins: the owner reads what happened, not only what this machine lacks.
+  if (!supported("stills") || !supported("test_copy")) return { pending: false, hold: s?.error ? say(PROBADOR_WORDS).missing(onScreen(s.error)) : say(PROBADOR_WORDS).unavailable(say(SISTEMA).unavailable.toLowerCase()) };
   if (!s || s.state === "tomando" || s.state === "fallo") return { pending: true, hold: null };
   if (head && s.commit && !head.startsWith(s.commit.slice(0, 7)) && !s.commit.startsWith(head.slice(0, 7))) return { pending: true, hold: null };
-  return { pending: false, hold: s.error ? `Faltan fotos: ${onScreen(s.error)}` : null };
+  // PLA-I74-10: a wrong page holds with its own reason (already in the owner's words).
+  if (s.wrong && s.error) return { pending: false, hold: onScreen(s.error) };
+  return { pending: false, hold: s.error ? say(PROBADOR_WORDS).missing(onScreen(s.error)) : null };
 }
 
 // ---- The read El Probador draws (GET /api/projects/:slug/probador/:key)
@@ -301,7 +491,8 @@ export type ParVista = {
   label: string;
   path: string;
   estado: string | null;
-  kind: "nueva" | "cambio" | "igual" | "sin_antes";
+  // PLA-76: «error» when the delivery's page showed a crash (framework overlay, 5xx) instead of the screen.
+  kind: "nueva" | "cambio" | "igual" | "sin_antes" | "error";
 } & Record<ViewportName, { antes: ParSide; despues: ParSide; diff: DiffBox | null }>;
 export type ProbadorRead = {
   key: string;
@@ -312,11 +503,19 @@ export type ProbadorRead = {
   preguntas: QA[]; // PLA-I52-6
 };
 
+// PLA-76: the después page crashed (the framework's error overlay, read by run.ts, or a 5xx), as opposed to a picture
+// that did not come out for another reason (the login, a missing link).
+// PLA-I2-10: run.ts writes these in the install's language (RUN_WORDS crash and answered); both are read, so a
+// still taken before a language change still counts.
+export const crashed = (error: string | null): boolean => !!error && /muestra un error: |respondió 5\d\d\b|shows an error: |answered 5\d\d\b/.test(error);
+
 export async function probadorRead(db: Db, slug: string, key: string): Promise<ProbadorRead | null> {
   const got = await load(db, slug, key);
   if (!got) return null;
   const { t } = got;
   const m = t.muestra ?? null;
+  // PLA-I74-10: the empty-state cases show after the muestra's own views.
+  const all = m ? [...m.vistas, ...(await emptyCases(db, t))] : [];
   const rows = m ? newestFirst(await readerOf(db).find("captureStills", { taskId: t.id, side: ["antes", "despues"] })) : [];
   const pick = (vista: string, vp: ViewportName, side: "antes" | "despues") => rows.find((r) => r.pageKey === vista && r.viewport === vp && r.side === side) ?? null;
   const sideOf = (r: (typeof rows)[number] | null): ParSide => ({
@@ -324,7 +523,7 @@ export async function probadorRead(db: Db, slug: string, key: string): Promise<P
     error: r && r.status === "error" && !r.missing ? r.error : null,
     missing: Boolean(r?.missing),
   });
-  const vistas: ParVista[] = (m?.vistas ?? []).map((v) => {
+  const vistas: ParVista[] = all.map((v) => {
     const per = Object.fromEntries(
       VIEWPORT_NAMES.map((vp) => {
         const d = pick(v.key, vp, "despues");
@@ -334,7 +533,7 @@ export async function probadorRead(db: Db, slug: string, key: string): Promise<P
     ) as Record<ViewportName, { antes: ParSide; despues: ParSide; diff: DiffBox | null }>;
     const desk = pick(v.key, "desktop", "despues");
     const raw = desk?.diff as Record<string, unknown> | null | undefined;
-    const kind: ParVista["kind"] = per.desktop.antes.missing || raw?.nueva ? "nueva" : !per.desktop.antes.still ? "sin_antes" : raw && "x" in raw ? "cambio" : desk?.status === "ok" ? "igual" : "sin_antes";
+    const kind: ParVista["kind"] = crashed(per.desktop.despues.error) ? "error" : per.desktop.antes.missing || raw?.nueva ? "nueva" : !per.desktop.antes.still ? "sin_antes" : raw && "x" in raw ? "cambio" : desk?.status === "ok" ? "igual" : "sin_antes";
     return { key: v.key, label: v.label, path: v.path, estado: v.estado ?? null, kind, ...per };
   });
   return { key: t.key, muestra: m, state: t.probador ?? null, vistas, entrega: entregaRead(slug), preguntas: await preguntasOf(db, got.p, t) };

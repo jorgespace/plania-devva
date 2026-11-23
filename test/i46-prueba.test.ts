@@ -4,7 +4,7 @@
 // (a tiny node server in a throwaway git repo) and checks the process group is gone after teardown. Test store only.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, describe, test } from "node:test";
@@ -13,6 +13,11 @@ import { resetTestStore, useTestEnv, type TestStore } from "./helpers.js";
 useTestEnv();
 const TMP = mkdtempSync(path.join(tmpdir(), "plania-prueba-test-"));
 process.env.PLANIA_CAPTURES_DIR = path.join(TMP, "captures");
+// PLA-I2-13: the rest of Plania's secrets (useTestEnv sets the database, MCP tokens, CI token and session secret)
+// and a Claude key: none may reach an app's command.
+process.env.GITHUB_TOKEN = "ghp-plania-secret";
+process.env.VAPID_PRIVATE_KEY = "vapid-plania-secret";
+process.env.ANTHROPIC_API_KEY = "sk-ant-not-for-apps";
 const WT_ROOT = path.join(TMP, "worktrees");
 const { app } = await import("../src/app.js");
 const { createSession, SESSION_COOKIE } = await import("../src/auth/session.js");
@@ -159,6 +164,9 @@ describe("Encenderla", () => {
     assert.equal(c.command, "npm run dev -- --port 3000");
     assert.equal(c.env.PORT, "3000");
     assert.equal(c.env.DATABASE_URL, undefined, "Plania's database never reaches the app");
+    // PLA-I2-13 #1: nor any other Plania secret; the app reads its own env file.
+    for (const k of ["DATABASE_URL", "MCP_BEARER_TOKEN", "MCP_READ_TOKEN", "SESSION_SECRET", "GITHUB_TOKEN", "VAPID_PRIVATE_KEY", "PLANIA_CI_TOKEN", "ANTHROPIC_API_KEY"]) assert.equal(c.env[k], undefined, k);
+    assert.deepEqual(Object.keys(c.env).filter((k) => k.startsWith("PLANIA_")), []);
     assert.ok(gitCalls.some((g) => g.join(" ") === `fetch origin sandbox @${REPO}`));
     assert.ok(gitCalls.some((g) => g.slice(0, 5).join(" ") === `worktree add --detach ${wt} origin/sandbox`));
     assert.ok(!gitCalls.some((g) => g.includes("main") || g.includes("origin/main")), "never main");
@@ -186,6 +194,16 @@ describe("Encenderla", () => {
     assert.equal((await liveServers()).length, 0);
     upPorts.delete(3000);
     assert.equal((await read("zigzag")).prueba.phase, "off");
+  });
+
+  test("PLA-110 (F-40): a copy El Probador starts (stills: false) goes live without the Ventana's stills", async () => {
+    await prueba.encender(db as never, "zigzag", { stills: false });
+    await until(() => children.length === 1);
+    upPorts.add(3000);
+    await until(async () => (await read("zigzag")).prueba.phase === "live");
+    assert.equal(captures.length, 0, "no Ventana stills: El Probador takes its own antes");
+    assert.equal((await post("zigzag", "apagar")).status, 200);
+    upPorts.delete(3000);
   });
 
   test("a failed start shows Error with what it printed, and Reintentar starts it again", async () => {
@@ -360,7 +378,8 @@ describe("Encenderla with a real process", () => {
     sh(["push", "-q", "origin", "sandbox"], seed);
     execFileSync("git", ["clone", "-q", origin, repo]);
     const port = 47_310;
-    await setCapture("filmia", SETTINGS(port, { start_command: `${process.execPath} server.mjs {port}` }), repo);
+    // Quoted: on Windows node lives under C:\Program Files (PLA-I2-19).
+    await setCapture("filmia", SETTINGS(port, { start_command: `"${process.execPath}" server.mjs {port}` }), repo);
     prueba.setPruebaDeps({
       env: { ...process.env, PLANIA_WORKTREES_ROOT: WT_ROOT },
       capture: async (_db, input) => (captures.push(input as Json), { run_id: "r", project: input.project, task_key: null, commit: null, branch: null, base_url: input.base_url!, ok: 1, failed: 0, stills: [] }),
@@ -381,9 +400,10 @@ describe("Encenderla with a real process", () => {
     assert.ok(fp, "registered");
     const pid = Number(fp.details.declared?.pid ?? fp.details.pid);
     await post("filmia", "apagar");
+    // The group on macOS and Linux; on Windows (no groups) the shell, and the closed port below shows its child went too.
     const gone = async () => {
       try {
-        process.kill(-pid, 0);
+        process.kill(process.platform === "win32" ? pid : -pid, 0);
         return false;
       } catch {
         return true;
@@ -401,5 +421,73 @@ describe("Encenderla with a real process", () => {
     assert.equal((await liveServers()).filter((x) => x.locator === `port:${port}`).length, 0, "released");
     t.diagnostic(`real copy on :${port}, pid ${pid}, stopped`);
     execFileSync("git", ["worktree", "remove", "--force", wt], { cwd: repo });
+  });
+});
+
+// PLA-I2-9: a test copy of Plania itself (the project's repo is the running server's checkout). On the devva store the
+// live server's data is its lobe prefix (PLANIA_DEVVA_PREFIX); the copy gets one of its own on the same engine.
+describe("a test copy of Plania itself", () => {
+  const SELF = path.join(TMP, "self-repo");
+  const LIVE = "plania_live";
+  let built: string[] = [];
+  const selfDeps = (over: Partial<Deps> = {}) =>
+    fakeDeps({ serverRoot: SELF, env: { ...process.env, PLANIA_WORKTREES_ROOT: WT_ROOT, PLANIA_DEVVA_PREFIX: LIVE }, selfDb: async (prefix) => (built.push(prefix), { ok: true }), ...over });
+
+  beforeEach(async () => {
+    built = [];
+    mkdirSync(SELF, { recursive: true });
+    // The owner's own .env, with the live store and jobs on.
+    writeFileSync(path.join(SELF, ".env"), `PLANIA_DEVVA_PREFIX=${LIVE}\nPLANIA_JOBS=1\nSESSION_SECRET=keep-me\n`);
+    await setCapture("zigzag", SETTINGS(3100, { start_command: "pnpm exec tsx scripts/dev.ts --port {port}" }), SELF);
+  });
+  after(async () => setCapture("zigzag", SETTINGS(3000), REPO));
+
+  test("check 4: it starts on its own new store with jobs off, never the live one", async () => {
+    prueba.setPruebaDeps(selfDeps());
+    await post("zigzag", "encender");
+    await until(() => children.length === 1);
+    const c = children[0]!;
+    const wt = path.join(WT_ROOT, "zigzag", "_prueba");
+    const name = `${LIVE}_prueba`;
+    assert.deepEqual(built, [name], "its own lobes, emptied before it starts");
+    assert.notEqual(c.env.PLANIA_DEVVA_PREFIX, LIVE);
+    assert.equal(c.env.PLANIA_DEVVA_PREFIX, name);
+    assert.deepEqual([c.env.PLANIA_JOBS, c.env.PLANIA_EVENT_WAKES, c.env.PLANIA_RUNNER_TOKEN, c.env.PORT, c.env.PLANIA_PORT], ["0", "0", "", "3100", "3100"]);
+    assert.equal(c.command, "pnpm exec tsx scripts/dev.ts --port 3100");
+    const file = readFileSync(path.join(wt, ".env"), "utf8");
+    assert.equal(file.split(/\r?\n/).includes(`PLANIA_DEVVA_PREFIX=${LIVE}`), false, "the copied env file no longer names the live store");
+    assert.match(file, new RegExp(`^PLANIA_DEVVA_PREFIX=${name}$`, "m"));
+    assert.match(file, /^PLANIA_JOBS=0$/m);
+    assert.match(file, /^SESSION_SECRET=keep-me$/m);
+    // The owner's own file is untouched.
+    assert.match(readFileSync(path.join(SELF, ".env"), "utf8"), /^PLANIA_JOBS=1$/m);
+  });
+
+  test("check 4: refused when it would take the live server's port, or when the live store cannot be named", async () => {
+    prueba.setPruebaDeps(selfDeps({ env: { ...process.env, PLANIA_WORKTREES_ROOT: WT_ROOT, PLANIA_DEVVA_PREFIX: LIVE, PLANIA_PORT: "3100" } }));
+    await post("zigzag", "encender");
+    await until(async () => (await read("zigzag")).prueba.phase === "failed");
+    assert.match((await read("zigzag")).prueba.error, /puerto del Plania que estás usando/);
+    assert.equal(children.length, 0);
+
+    prueba.resetPrueba();
+    built = [];
+    // A live prefix no copy prefix can be made from: the store the owner uses is not known.
+    prueba.setPruebaDeps(selfDeps({ env: { ...process.env, PLANIA_WORKTREES_ROOT: WT_ROOT, PLANIA_DEVVA_PREFIX: "Not A Prefix!" } }));
+    await post("zigzag", "encender");
+    await until(async () => (await read("zigzag")).prueba.phase === "failed");
+    assert.match((await read("zigzag")).prueba.error, /no enciendo la copia/);
+    assert.equal(children.length, 0);
+    assert.equal(built.length, 0);
+  });
+
+  test("any other project keeps its own env file as it was", async () => {
+    prueba.setPruebaDeps(selfDeps({ serverRoot: path.join(TMP, "not-this-one") }));
+    await post("zigzag", "encender");
+    await until(() => children.length === 1);
+    assert.equal(built.length, 0);
+    assert.equal(children[0]!.env.DATABASE_URL, undefined);
+    assert.equal(children[0]!.env.PLANIA_DEVVA_PREFIX, undefined);
+    assert.equal(readFileSync(path.join(WT_ROOT, "zigzag", "_prueba", ".env"), "utf8"), `PLANIA_DEVVA_PREFIX=${LIVE}\nPLANIA_JOBS=1\nSESSION_SECRET=keep-me\n`);
   });
 });

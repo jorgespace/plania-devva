@@ -5,6 +5,7 @@ import { readerOf } from "../store/port.js";
 import { enqueueWake, eventWakesEnabled, serviceAgent } from "./events.js";
 import { ACTIVE_STATUSES, workKeyOf } from "./queue.js";
 import { STAGE_REASON, stageOwner, type IdeaStage } from "./stages.js";
+import { ST } from "../state/status.js";
 
 const SWEPT: readonly string[] = ["idea", "research", "design", "planning"];
 
@@ -22,7 +23,7 @@ export async function sweepStalledIdeas(db: Db, now = new Date(), env: NodeJS.Pr
   if (!eventWakesEnabled(env)) return 0;
   const r = readerOf(db);
   const found: { t: Task; slug: string }[] = [];
-  const ideas = await r.find("tasks", { kind: "idea", status: "Open", promotedTo: null, stage: [...SWEPT] }, { orderBy: [{ column: "createdAt" }] });
+  const ideas = await r.find("tasks", { kind: "idea", status: ST.open, promotedTo: null, stage: [...SWEPT] }, { orderBy: [{ column: "createdAt" }] });
   for (const t of ideas) {
     if (found.length >= 50) break;
     const p = await r.get("projects", { id: t.projectId });

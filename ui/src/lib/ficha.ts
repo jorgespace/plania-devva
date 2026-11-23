@@ -4,9 +4,17 @@
 // the floor they name). Pure; the page owns the navigation.
 // PLA-I54-3: Pedido, the owner's requests taking shape (a capsule in the tube opens there).
 // PLA-I59-3: Motores, the model and effort of each teammate on this floor (motores.tsx).
+import { defineWords, getLanguage, words, type Language } from "./i18n.js";
+
 export const FICHA_TABS = ["resumen", "pedido", "ideas", "diseno", "prs", "docs", "motores"] as const;
 export type FichaTab = (typeof FICHA_TABS)[number];
-export const TAB_WORD: Record<FichaTab, string> = { resumen: "Resumen", pedido: "Pedido", ideas: "Ideas", diseno: "Diseño", prs: "PRs", docs: "Docs", motores: "Motores" };
+// PLA-I2-10: the tabs' names in both languages; TAB_WORD keeps the Spanish for callers that read the constant.
+export const TAB_WORDS = defineWords({
+  es: { resumen: "Resumen", pedido: "Pedido", ideas: "Ideas", diseno: "Diseño", prs: "PRs", docs: "Docs", motores: "Motores" } as Record<FichaTab, string>,
+  en: { resumen: "Summary", pedido: "Request", ideas: "Ideas", diseno: "Design", prs: "PRs", docs: "Docs", motores: "Engines" },
+});
+export const TAB_WORD: Record<FichaTab, string> = TAB_WORDS.es;
+export const tabWord = (tab: FichaTab, language: Language = getLanguage()): string => words(TAB_WORDS, language)[tab];
 
 export type FichaRef =
   | { kind: "tab"; tab: FichaTab }
@@ -133,3 +141,11 @@ export const isMaq = (ref: FichaRef) => ref.kind === "maq" || ref.kind === "maq-
 export const needsTask = (ref: FichaRef): string | null => (ref.kind === "step" ? ref.key : null);
 // PLA-I61: an idea and an owner's request both open La idea abierta (GET …/ideas/:key).
 export const needsIdea = (ref: FichaRef): string | null => (ref.kind === "idea" || ref.kind === "pedido" ? ref.key : null);
+
+// PLA-148 (F-3): the stops that only ask for a look. Entendido, Investigación, Diseño and the plan go on by themselves
+// when the owner says nothing (the PO's reading, the recommended option, the frames as drawn), so their bar reads
+// «Para revisar», not «Te toca»: Todo counts nothing there. «Te toca» is kept for what waits on him (a PO's question,
+// «Constrúyelo», a step to accept, closing an initiative).
+export const SOFT_REVIEW_STOPS = ["entendido", "investigacion", "diseno", "plan"] as const;
+export type StopBar = "review" | "you";
+export const stopBar = (stop: string): StopBar => ((SOFT_REVIEW_STOPS as readonly string[]).includes(stop) ? "review" : "you");

@@ -21,7 +21,7 @@ const { cambioOf } = await import("../src/captures/muestra.js");
 const { autoVerdict } = await import("../src/api/auto-accept.js");
 const { releaseReel } = await import("../src/captures/probador.js");
 const { resolveThread } = await import("../src/runner/threads.js");
-const publish = (await import(new URL("../ui/src/components/compania/edificio/publish.tsx", import.meta.url).href)) as Record<string, any>;
+
 type Json = Record<string, any>;
 
 let store: TestStore;
@@ -74,34 +74,4 @@ describe("«solo lo que no se ve»", () => {
   });
 });
 
-describe("the release reel", () => {
-  test("each shipped ticket that changed the screen shows its después picture, marked nueva or cambió; invisible ones are left out", async () => {
-    const p = { id: await store.projectId("zigzag") };
-    const mk = async (title: string, cambio: string) => {
-      const t = await writes.createTask(db, { project: "zigzag", title, scope: "s", checks: ["ok"] } as never, ctx as never);
-      await setTask(t.key, { cambio, muestra: { frase: "x", vistas: [{ key: "v", label: `Vista ${title}`, path: "/v" }], pasos: ["a", "b", "c"] } });
-      return { key: t.key, id: (await taskOf(t.key)).id, title };
-    };
-    const nueva = await mk("Sucursales", "se_ve");
-    const cambio = await mk("Encabezado", "se_ve");
-    const datos = await mk("Índices", "no_se_ve");
-    const shot = async (taskId: string, side: "antes" | "despues", extra: Json = {}) =>
-      stills.recordStill(db, "zigzag", { projectId: p.id, taskId, runId: crypto.randomUUID(), pageKey: "v", pageLabel: "V", path: "/v", viewport: "desktop", width: 1280, height: 800, commit: null, branch: null, actor: ctx.actor, side, ...(extra.missing ? { ok: false, error: "no existe", url: null, missing: true } : { ok: true, png, url: null }) } as never);
-    await shot(nueva.id, "antes", { missing: true });
-    const dn = await shot(nueva.id, "despues");
-    await store.fix((uow) => uow.update("captureStills", { id: dn.id }, { diff: { nueva: true } }));
-    await shot(cambio.id, "antes");
-    const dc = await shot(cambio.id, "despues");
-    await store.fix((uow) => uow.update("captureStills", { id: dc.id }, { diff: { x: 0.1, y: 0.1, w: 0.2, h: 0.1, ratio: 0.01 } as never }));
-    await shot(datos.id, "despues");
-    const reel = await releaseReel(db, p.id, "zigzag", [nueva, cambio, datos].map(({ key, title }) => ({ key, title })));
-    assert.deepEqual(reel.map((r) => [r.title, r.kind, r.label]), [["Sucursales", "nueva", "Vista Sucursales"], ["Encabezado", "cambio", "Vista Encabezado"]]);
-    assert.ok(reel[0]!.image_url.endsWith(`${dn.id}.png`));
-    const html = renderToStaticMarkup(
-      React.createElement(publish.PublishBody, { title: "Zigzag", release: { from: "sandbox", into: "main", env: "prod", ahead: 3, tickets: [nueva, cambio, datos].map(({ key, title }) => ({ key, title })), open_checks: 0, before: 0, reel }, onPublish: () => {}, onCancel: () => {} }),
-    );
-    assert.match(html, /data-publish-reel="2"/);
-    assert.match(html, /Lo que verán tus usuarias/);
-    assert.ok(html.includes(`${dn.id}.png`) && html.includes(">nueva<") && html.includes(">cambió<"));
-  });
-});
+

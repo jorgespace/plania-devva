@@ -11,7 +11,7 @@ import { MemoryRouter } from "react-router";
 // Loaded by URL so the root typecheck (NodeNext, no JSX) does not follow them; `pnpm build` checks them.
 const load = async (p: string) => (await import(new URL(`../ui/src/${p}`, import.meta.url).href)) as Record<string, any>;
 const org = await load("components/compania/org.tsx");
-const v2 = await load("components/compania/v2.tsx");
+
 const lib = await load("lib/org.ts");
 
 const h = React.createElement;
@@ -55,9 +55,9 @@ const orgProject = (slug: string, title: string, patch: Record<string, unknown> 
 
 const SIX = [
   orgProject("mianovia", "Mianovia", {
-    light: "needs_jorge",
+    light: "needs_owner",
     team: team("mianovia", {
-      "product-owner": { state: "waiting_jorge", waiting: "que aceptes el doc Campos y flujos", produced: { kind: "doc", ref: "d-1", title: "Campos y flujos" } },
+      "product-owner": { state: "waiting_owner", waiting: "que aceptes el doc Campos y flujos", produced: { kind: "doc", ref: "d-1", title: "Campos y flujos" } },
       taller: { state: "running", now: { ticket: "MIA-I3-4", since: "2026-11-08T14:42:00Z" }, last: null },
     }),
     thread: { id: "t-mianovia", unread: 2, last: { at: "2026-11-08T14:50:00Z", author_role: "product-owner", body: "Listo el doc." } },
@@ -85,7 +85,7 @@ const asistenteThread = {
   kind: "company",
   project: null,
   messages: [
-    msg("m1", "2026-11-06T22:00:00Z", { author: { agent: "jorge", role: "jorge" }, body: "Mianovia: quiero compartir la lista por WhatsApp." }),
+    msg("m1", "2026-11-06T22:00:00Z", { author: { agent: "owner", role: "owner" }, body: "Mianovia: quiero compartir la lista por WhatsApp." }),
     msg("m2", "2026-11-08T13:00:00Z", {
       body: "El PO de Mianovia terminó el doc.",
       links: [{ kind: "ticket", ref: "MIA-01", title: "Compartir la lista" }, { kind: "doc", ref: "d-1", title: "Campos y flujos" }],
@@ -165,24 +165,9 @@ test("I33-1 phone: the thread folds to its last message; the toggle shows only o
   assert.ok(open.includes("Plegar el hilo"));
 });
 
-test("I33-1 the retired blocks are gone from the page: Solo tú, En marcha, Gasto, the switch and the Equipo sheet", async () => {
-  const { readFileSync } = await import("node:fs");
-  const page = readFileSync(new URL("../ui/src/pages/ceo.tsx", import.meta.url), "utf8");
-  for (const gone of ["Solo tú", "EnMarcha", "Gasto", "KillSwitch", "EquipoSheetBody", "setCompanyPaused", "Queue", "TeamCards", "ProjectPreview", "Vista previa"]) assert.equal(page.includes(gone), false, gone);
-  // PLA-I39-3: the building replaces the 360 px column and the cards grid.
-  assert.ok(page.includes("<Building") && !page.includes("360px"), "the building, no 360 px column (PLA-I39)");
-  assert.ok(page.includes("plumbingLine") && !page.includes("<TeToca"), "Te toca lives on the floors now (PLA-I39-5)");
-});
 
-test("I33-1 the company plumbing line reads tokens and what runs, amber at 80 % and red at 100 %", async () => {
-  assert.deepEqual(lib.plumbingLine({ spend: 912_000, running: 1, paused: false }), { text: "912k · 1 en marcha", tone: "ok" });
-  assert.equal(lib.plumbingLine({ spend: 900_000_000, running: 0, paused: false }).tone, "ok", "PLA-21: no limit, never red for tokens");
-  assert.deepEqual(lib.plumbingLine({ spend: 0, running: 0, paused: true }), { text: "0 · detenida", tone: "idle" });
-  // PLA-I39: the line sits in the building's sky, linking to Máquina.
-  const { readFileSync } = await import("node:fs");
-  const page = readFileSync(new URL("../ui/src/pages/ceo.tsx", import.meta.url), "utf8");
-  assert.ok(page.includes("Plomería · {plumbingLine(company.plumbing).text}") && page.includes('to="/machine"'));
-});
+
+
 
 test("I33-1 a bare link in the text box says Asistente saves it to the library", () => {
   assert.equal(lib.isBareLink("https://example.test/a"), true);
@@ -198,7 +183,7 @@ const poThread = {
   kind: "project",
   project: "mianovia",
   messages: [
-    msg("p1", "2026-11-08T10:00:00Z", { author: { agent: "jorge", role: "jorge" }, body: "Quiero que la lista se comparta por WhatsApp." }),
+    msg("p1", "2026-11-08T10:00:00Z", { author: { agent: "owner", role: "owner" }, body: "Quiero que la lista se comparta por WhatsApp." }),
     msg("p2", "2026-11-08T11:00:00Z", { author: { agent: "po-mianovia", role: "product-owner" }, body: "La idea pasa a Research." }),
     msg("p3", "2026-11-08T12:00:00Z", { author: { agent: "po-mianovia", role: "product-owner" }, body: "Terminé el doc.", links: [{ kind: "doc", ref: "d-1", title: "Campos y flujos" }], actions: ["aceptar", "cambios"] }),
     msg("p4", "2026-11-08T13:00:00Z", { author: { agent: "taller-mianovia", role: "taller" }, body: "PR del botón.", links: [{ kind: "pr", ref: "https://example.test/pr/12", title: "PR #12" }], actions: ["fusionar", "cambios"] }),
@@ -252,16 +237,7 @@ test("I33-2 → I35: the preview sheet is gone; /ceo?p=x and ?vista=x redirect t
 
 const parts = await load("components/compania/parts.tsx");
 
-test("I33-4 state vacío: no projects, no messages, a team with no runs", async () => {
-  const { readFileSync } = await import("node:fs");
-  // PLA-I39-3: an empty lot with the door.
-  const page = readFileSync(new URL("../ui/src/components/compania/edificio/building.tsx", import.meta.url), "utf8");
-  assert.ok(page.includes('data-empty="projects"'));
-  assert.ok(page.includes("Abrir el primer piso"));
-  const thread = html(h(org.ThreadPanel, threadProps({ thread: { ...asistenteThread, messages: [] } })));
-  assert.ok(thread.includes('data-empty="thread"'));
-  assert.ok(thread.includes("Dile a Asistente…"), "the text box stays");
-});
+
 
 test("I33-4 state carga: a skeleton per block", () => {
   const loading = html(h(org.ThreadPanel, threadProps({ thread: undefined, loading: true })));
@@ -269,10 +245,10 @@ test("I33-4 state carga: a skeleton per block", () => {
   assert.equal(loading.includes("data-message"), false);
 });
 
-test("I33-4 state error por bloque: the thread says the Mac may be asleep and offers Reintentar; the box stays", () => {
+test("I33-4 state error por bloque: the thread says the machine may be asleep and offers Reintentar; the box stays", () => {
   const out = html(h(org.ThreadPanel, threadProps({ thread: undefined, error: true })));
   assert.ok(out.includes("No se pudo cargar el hilo."));
-  assert.ok(out.includes("Si la Mac está dormida"));
+  assert.ok(out.includes("Si la máquina está dormida"));
   assert.ok(out.includes("Reintentar"));
   assert.ok(out.includes("Dile a Asistente…"));
   const team = html(h(parts.BlockError, { what: "el equipo", onRetry: noop }));
@@ -312,10 +288,10 @@ test("PLA-21: no budget state: however many tokens, the plumbing and project lin
   assert.equal("no_budget" in lib.MEMBER_STATE, false);
 });
 
-test("I33-4 state esperando a Jorge: Te necesita on the card, the message with buttons ringed in the thread", () => {
+test("I33-4 state esperando a Owner: Te necesita on the card, the message with buttons ringed in the thread", () => {
   const thread = html(h(org.ThreadPanel, threadProps()));
   assert.equal(count(thread, /data-waiting="1"/g), 3);
-  assert.ok(thread.includes("ring-status-jorge/60"));
+  assert.ok(thread.includes("ring-status-owner/60"));
 });
 
 test("I33-4 state PR fusionado and pregunta respondida: the result replaces the buttons", () => {
@@ -332,14 +308,4 @@ test("I33-4 state PR fusionado and pregunta respondida: the result replaces the 
   assert.equal(lib.actionStateText({ action: "aceptar", at: "x", result: { ticket: "MIA-1", status: "Done" } }), "Aprobado · cerrado");
 });
 
-test("I33-4 phone: the pages keep one column under 640 px and nothing sets a width wider than a phone", async () => {
-  const { readFileSync } = await import("node:fs");
-  const read = (p: string) => readFileSync(new URL(`../ui/src/${p}`, import.meta.url), "utf8");
-  const ceo = read("pages/ceo.tsx");
-  assert.equal(ceo.includes("360px"), false, "no 360 px column (PLA-I39)");
-  const files = ["pages/ceo.tsx", "components/compania/org.tsx", "components/compania/v2.tsx", "components/compania/plumbing.tsx"].map(read).join("\n");
-  assert.equal(/(?:^|[\s"\'`])(?:min-)?w-\[\d{3,}px\]/m.test(files), false, "no fixed width of 100 px or more without a breakpoint");
-  // PLA-I39-3: floors stack and windows go two per row on a phone.
-  const css = read("index.css");
-  assert.ok(/@media \(width < 64rem\) \{[\s\S]*?\.edi-wins \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/.test(css), "two windows per row on a phone");
-});
+

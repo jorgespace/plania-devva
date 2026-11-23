@@ -15,8 +15,9 @@ export const ACTIVE_STATUSES = ["queued", "starting", "running"] as const;
 export const LIVE_STATUSES = ["starting", "running"] as const;
 const REASON_MAX = 2000;
 
-export const workKeyOf = (taskKey: string | null | undefined, consultaId?: string | null): string =>
-  consultaId ? `consulta:${consultaId}` : taskKey ? `task:${taskKey}` : "general";
+// PLA-I67-6: trial:<id> is a skill trial (src/runner/trial.ts); it has no task key.
+export const workKeyOf = (taskKey: string | null | undefined, consultaId?: string | null, trialId?: string | null): string =>
+  trialId ? `trial:${trialId}` : consultaId ? `consulta:${consultaId}` : taskKey ? `task:${taskKey}` : "general";
 
 export const consultaIdOfRun = (run: Pick<AgentRun, "workKey">): string | null => (run.workKey.startsWith("consulta:") ? run.workKey.slice("consulta:".length) : null);
 
@@ -26,6 +27,7 @@ export type RunInsert = {
   role: string;
   taskKey: string | null;
   consultaId?: string | null;
+  trialId?: string | null;
   trigger: RunTrigger;
   reason?: string | null;
   // Display text for the queued row (the screen shows it); never read for meaning.
@@ -49,7 +51,7 @@ const lastChars = (s: string): string => {
 // one; otherwise a write of its own under the run's project.
 export async function insertRun(tx: Q, input: RunInsert): Promise<RunInserted> {
   const lane: RunLane = input.consultaId ? "consulta" : "work";
-  const workKey = workKeyOf(input.taskKey, input.consultaId);
+  const workKey = workKeyOf(input.taskKey, input.consultaId, input.trialId);
   const reason = input.reason?.trim() ? input.reason.trim().slice(0, REASON_MAX) : null;
   const out = await writeVia(
     tx,

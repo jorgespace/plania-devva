@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BellIcon, CloudOffIcon, EllipsisIcon, KeyRoundIcon, LogOutIcon } from "lucide-react";
+import { forgetReads } from "@/lib/last-read";
+import { BellIcon, CloudOffIcon, EllipsisIcon, GaugeIcon, KeyRoundIcon, LogOutIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -20,11 +21,14 @@ import { api } from "@/lib/api";
 import { disablePush, enablePush, PushError, pushHint, pushStatus, type PushStatus } from "@/lib/push";
 import { LiveProvider, useLive } from "@/lib/live";
 import { cn } from "@/lib/utils";
+import { words } from "@/lib/i18n";
+import { SHELL } from "@/lib/shell-words";
 
 // On a phone only the dot shows; the label stays for screen readers.
 function LiveIndicator() {
   const { connected, online } = useLive();
-  const label = !online ? "Sin conexión" : connected ? "En vivo" : "Reconectando";
+  const w = words(SHELL);
+  const label = !online ? w.offline : connected ? w.live : w.reconnecting;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -37,8 +41,8 @@ function LiveIndicator() {
       </TooltipTrigger>
       <TooltipContent>
         {!online
-          ? "El dispositivo no tiene red."
-          : connected ? "Los cambios de los agentes aparecen al instante." : "Sin conexión en vivo; reintentando."}
+          ? w.offlineTip
+          : connected ? w.liveTip : w.reconnectingTip}
       </TooltipContent>
     </Tooltip>
   );
@@ -47,11 +51,12 @@ function LiveIndicator() {
 // Shown under the header while the device has no network; the cached app still opens.
 function OfflineBanner() {
   const { online } = useLive();
+  const w = words(SHELL);
   if (online) return null;
   return (
     <div className="flex items-center justify-center gap-2 border-b bg-status-idle/15 px-4 py-1.5 text-xs text-muted-foreground" role="status">
       <CloudOffIcon className="size-3.5" aria-hidden />
-      Sin conexión: los datos pueden estar desactualizados.
+      {w.offlineBanner}
     </div>
   );
 }
@@ -61,6 +66,7 @@ function OfflineBanner() {
 function PushSwitch() {
   const [status, setStatus] = useState<PushStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const w = words(SHELL);
   useEffect(() => {
     void pushStatus().then(setStatus).catch(() => setStatus({ state: "unsupported", reason: "browser" }));
   }, []);
@@ -72,10 +78,10 @@ function PushSwitch() {
     try {
       const next = on ? await disablePush() : await enablePush();
       setStatus(next);
-      if (next.state === "on") toast("Te avisaremos en este dispositivo");
-      else if (!on && next.state !== "off") toast.error(pushHint(next) ?? "No se activaron los avisos.");
+      if (next.state === "on") toast(w.pushOn);
+      else if (!on && next.state !== "off") toast.error(pushHint(next) ?? w.pushNotOn);
     } catch (e) {
-      toast.error(e instanceof PushError ? e.message : "No se pudieron cambiar los avisos.");
+      toast.error(e instanceof PushError ? e.message : w.pushFailed);
     } finally {
       setBusy(false);
     }
@@ -91,7 +97,7 @@ function PushSwitch() {
       className="flex-wrap"
     >
       <BellIcon />
-      <span className="flex-1">Avisarme cuando me toque</span>
+      <span className="flex-1">{w.pushLabel}</span>
       <Switch checked={on} tabIndex={-1} aria-hidden className="pointer-events-none" />
       {hint && <span className="basis-full pl-6 text-xs text-muted-foreground">{hint}</span>}
     </DropdownMenuItem>
@@ -102,24 +108,29 @@ function PushSwitch() {
 // agent tokens (the old key icon), push, theme and logout.
 function MoreMenu({ onLogout }: { onLogout: () => void }) {
   const navigate = useNavigate();
+  const w = words(SHELL);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="Más">
+        <Button variant="ghost" size="icon" aria-label={w.more}>
           <EllipsisIcon />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-64">
+        {/* AUDIT-5: the quality scoreboard is not one of the five destinations, so it lives here. */}
+        <DropdownMenuItem onSelect={() => navigate("/calidad")}>
+          <GaugeIcon /> {w.quality}
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => navigate("/tokens")}>
-          <KeyRoundIcon /> Tokens de agentes
+          <KeyRoundIcon /> {w.tokens}
         </DropdownMenuItem>
         <PushSwitch />
         <DropdownMenuSeparator />
-        <DropdownMenuLabel>Tema</DropdownMenuLabel>
+        <DropdownMenuLabel>{w.theme}</DropdownMenuLabel>
         <ThemeChoices />
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onLogout}>
-          <LogOutIcon /> Salir
+          <LogOutIcon /> {w.logout}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -131,8 +142,8 @@ export function AppShell() {
   const queryClient = useQueryClient();
   // PLA-29: Compañía (/ceo) is the building itself: it runs edge to edge under the header, with no gutter or
   // max width around it. The phone keeps room for the tab bar.
-  // PLA-I49-4: the Morning brief's desk (/brief) fills the page the same way.
-  const fullBleed = ["/ceo", "/brief"].includes(useLocation().pathname);
+  // PLA-I62: La corriente (Compañía) and Plomería (/machine) too.
+  const fullBleed = ["/ceo", "/machine"].includes(useLocation().pathname);
   // The Bandeja badge and Máquina's quiet Limpieza count; live changes refresh them.
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api.inbox(), staleTime: 15_000 });
   const counts = { inbox: inbox.data?.count ?? 0, chores: inbox.data?.chores ?? 0 };
@@ -140,6 +151,7 @@ export function AppShell() {
   async function logout() {
     await api.logout();
     queryClient.clear();
+    forgetReads(); // PLA-74
     navigate("/login", { replace: true });
   }
 

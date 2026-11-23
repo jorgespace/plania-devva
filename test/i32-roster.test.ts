@@ -12,12 +12,12 @@ const { roleOf } = await import("../src/runner/limits.js");
 const { notNull } = await import("../src/store/types.js");
 
 const PROJECTS: [slug: string, title: string, prefix: string][] = [
-  ["filmia", "Filmia", "FIL"],
-  ["mianovia", "Mianovia", "MIA"],
-  ["micasa", "MiCasa", "MIC"],
+  ["alfa", "Alfa", "ALF"],
+  ["bravo", "Bravo", "BRV"],
+  ["charlie", "Charlie", "CHA"],
+  ["delta", "Delta", "DEL"],
+  ["eco", "Eco", "ECO"],
   ["plania", "Plania", "PLA"],
-  ["workia", "Workia", "WRK"],
-  ["zigzag", "Zigzag", "ZIG"],
 ];
 
 // Today's 11 rows after PLA-I30-1 (fake names, same roles).
@@ -27,21 +27,23 @@ const ROSTER: [slug: string, name: string, role: string, title: string, kind: st
   ["taller", "Taller", "taller", "Builder", "bot", "{engineering}", "ceo"],
   ["research", "Research", "shared", "Shared service", "bot", "{research}", "asistente"],
   ["artist", "Artist", "shared", "Shared service", "bot", "{design}", "asistente"],
-  ["po-mianovia", "Bot Mianovia", "product-owner", "Product owner", "bot", "{mianovia}", "ceo"],
-  ["housi", "Housi", "product-owner", "Product owner", "bot", "{micasa}", "ceo"],
-  ["workia", "Workia", "product-owner", "Product owner", "bot", "{workia}", "ceo"],
-  ["filmia", "Filmia", "product-owner", "Product owner", "bot", "{filmia}", "ceo"],
-  ["zigzag", "ZigZag", "product-owner", "Product owner", "bot", "{zigzag}", "ceo"],
-  ["owner-plania", "Plania", "product-owner", "Product owner", "bot", "{plania}", "ceo"],
+  ["po-charlie", "Bot Charlie", "product-owner", "Product owner", "bot", "{charlie}", "ceo"],
+  ["po-alfa", "Casita", "product-owner", "Product owner", "bot", "{alfa}", "ceo"],
+  ["po-delta", "Delta", "product-owner", "Product owner", "bot", "{delta}", "ceo"],
+  ["po-bravo", "Bravo", "product-owner", "Product owner", "bot", "{bravo}", "ceo"],
+  ["po-eco", "Eco", "product-owner", "Product owner", "bot", "{eco}", "ceo"],
+  ["po-plania", "Plania", "product-owner", "Product owner", "bot", "{plania}", "ceo"],
 ];
 
 test("I32-2: today's 11-row roster becomes asistente, ceo and six teams of four; the shared three retire with their history", async () => {
-  // The test store starts with four of the six projects; the roster starts empty.
+  // The test store starts with its four seeded projects, none of them these six: they go (nothing hangs off them yet),
+  // and the roster starts empty.
   const store = await resetTestStore();
   try {
     // A Postgres array literal ("{a,b}") as a list.
     const list = (literal: string) => literal.slice(1, -1).split(",").filter(Boolean);
     await store.fix(async (uow) => {
+      await uow.delete("projects", { slug: ["micasa", "workia", "filmia", "zigzag"] });
       for (const [slug, title, prefix] of PROJECTS) if (!(await uow.get("projects", { slug }))) await uow.insert("projects", { slug, title, keyPrefix: prefix });
       for (const [slug, nm, role, title, kind, caps] of ROSTER) {
         await uow.insert("agents", { slug, name: nm, role, title, kind, adapter: kind === "human" ? "none" : "claude_code", adapterConfig: { command_env: "CLAUDE_CODE_BIN" }, capabilities: list(caps) });
@@ -56,25 +58,24 @@ test("I32-2: today's 11-row roster becomes asistente, ceo and six teams of four;
       return agent.id;
     };
     const pid = (slug: string) => store.projectId(slug);
-    // History on the rows that change: runs of a PO about to be renamed and of the shared taller,
-    // an open ticket of the shared taller in micasa and a closed one in filmia.
-    const [housi, taller, ownerPlania, micasa, filmia] = [await id("housi"), await id("taller"), await id("owner-plania"), await pid("micasa"), await pid("filmia")];
+    // History on the rows that change or stay: runs of an existing PO and of the shared taller,
+    // an open ticket of the shared taller in alfa and a closed one in bravo.
+    const [poAlfa, taller, poPlania, alfa, bravo] = [await id("po-alfa"), await id("taller"), await id("po-plania"), await pid("alfa"), await pid("bravo")];
     await store.fix(async (uow) => {
-      await uow.insert("agentRuns", { agentId: housi, projectId: micasa, role: "product-owner", status: "ok" });
-      await uow.insert("agentRuns", { agentId: housi, projectId: micasa, role: "product-owner", status: "fail" });
-      await uow.insert("agentRuns", { agentId: taller, projectId: micasa, role: "taller", status: "ok" });
-      await uow.insert("heartbeatRuns", { agentId: ownerPlania, startedAt: uow.now, status: "ok", adapter: "claude_code" });
-      await uow.insert("tasks", { projectId: micasa, key: "MIC-1", title: "Fake open ticket", kind: "ticket", status: "Ready", ownerAgent: taller });
-      await uow.insert("tasks", { projectId: filmia, key: "FIL-1", title: "Fake closed ticket", kind: "ticket", status: "Done", ownerAgent: taller });
+      await uow.insert("agentRuns", { agentId: poAlfa, projectId: alfa, role: "product-owner", status: "ok" });
+      await uow.insert("agentRuns", { agentId: poAlfa, projectId: alfa, role: "product-owner", status: "fail" });
+      await uow.insert("agentRuns", { agentId: taller, projectId: alfa, role: "taller", status: "ok" });
+      await uow.insert("heartbeatRuns", { agentId: poPlania, startedAt: uow.now, status: "ok", adapter: "claude_code" });
+      await uow.insert("tasks", { projectId: alfa, key: "ALF-1", title: "Fake open ticket", kind: "ticket", status: "Ready", ownerAgent: taller });
+      await uow.insert("tasks", { projectId: bravo, key: "BRV-1", title: "Fake closed ticket", kind: "ticket", status: "Done", ownerAgent: taller });
     });
-    const housiId = await id("housi");
+    const alfaPoId = await id("po-alfa");
 
     const { db } = makeDb();
     const first = await seedOrg(db);
-    assert.deepEqual(first.renamed.sort(), ["filmia→po-filmia", "housi→po-micasa", "owner-plania→po-plania", "workia→po-workia", "zigzag→po-zigzag"]);
     assert.deepEqual(first.retired.sort(), ["artist", "research", "taller"]);
     const second = await seedOrg(db);
-    assert.deepEqual([second.inserted, second.removed, second.renamed, second.retired], [[], [], [], []], "a second run changes nothing");
+    assert.deepEqual([second.inserted, second.removed, second.retired], [[], [], []], "a second run changes nothing");
 
     const agents = await store.find("agents", {}, { orderBy: [{ column: "slug" }] });
     const projectSlug = new Map((await store.find("projects")).map((p) => [p.id, p.slug]));
@@ -116,20 +117,19 @@ test("I32-2: today's 11-row roster becomes asistente, ceo and six teams of four;
     const retired = rows.filter((r) => r.status === "retired");
     assert.deepEqual(retired.map((r) => [r.slug, r.adapter, r.project]), [["artist", "none", null], ["research", "none", null], ["taller", "none", null]]);
 
-    // Renamed POs keep their id, name and runs; the old slug is in the note.
-    const micasaPo = (await store.get("agents", { slug: "po-micasa" }))!;
-    assert.equal(micasaPo.id, housiId);
-    assert.equal(micasaPo.name, "Housi");
-    assert.match(micasaPo.note, /alias: housi/);
-    assert.equal(await store.count("agentRuns", { agentId: housiId }), 2);
+    // An existing PO keeps its id, name and runs (PLA-I2-3: no slug is renamed any more).
+    const alfaPo = (await store.get("agents", { slug: "po-alfa" }))!;
+    assert.equal(alfaPo.id, alfaPoId);
+    assert.equal(alfaPo.name, "Casita");
+    assert.equal(await store.count("agentRuns", { agentId: alfaPoId }), 2);
     assert.equal(await store.count("heartbeatRuns", { agentId: await id("po-plania") }), 1);
-    assert.equal((await store.get("agents", { slug: "po-mianovia" }))!.name, "Bot Mianovia", "an existing name is kept");
+    assert.equal((await store.get("agents", { slug: "po-charlie" }))!.name, "Bot Charlie", "an existing name is kept");
 
     // The shared taller keeps its run; its open ticket moved to the project's Taller, the closed one stayed.
     assert.equal(await store.count("agentRuns", { agentId: await id("taller") }), 1);
     const slugOf = new Map((await store.find("agents")).map((a) => [a.id, a.slug]));
     const owners = (await store.find("tasks", { ownerAgent: notNull() }, { orderBy: [{ column: "key" }] })).map((t) => ({ key: t.key, slug: slugOf.get(t.ownerAgent!) }));
-    assert.deepEqual(owners, [{ key: "FIL-1", slug: "taller" }, { key: "MIC-1", slug: "taller-micasa" }]);
+    assert.deepEqual(owners, [{ key: "ALF-1", slug: "taller-alfa" }, { key: "BRV-1", slug: "taller" }]);
   } finally {
     await store.end();
   }

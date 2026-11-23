@@ -1,4 +1,4 @@
-// The Plania server: it runs on this Mac only.
+// The Plania server: it runs on this machine only.
 // Serves /mcp, the API and the built SPA (dist/ui) from one process.
 //   pnpm start            → port 3737, the launchd service
 //   pnpm dev:api          → port 3738, behind Vite's dev proxy
@@ -13,9 +13,17 @@ import { Hono } from "hono";
 import { app } from "../src/app.js";
 import { startJobs } from "../src/jobs/index.js";
 import { withDb } from "../src/db/client.js";
+import { loadOwnerName } from "../src/owner.js";
+import { loadInstallState } from "../src/install-state.js";
+import { startupProblem } from "../src/install/connect.js";
 import { sweepOrphans } from "../src/runner/runner.js";
-import { gitState, readUiBuild, staleReason } from "../src/ui-build.js";
+import { healthUi, readUiBuild, rebuildReason } from "../src/ui-build.js";
 import { reapOrphans } from "../src/captures/prueba.js";
+import { reconcileCopias } from "../src/maquinas/copias.js";
+import { drainOnParentRequest, exitAfterDrain, setHttpServer } from "../src/ops/shutdown.js";
+import { GOOD_AFTER_MS, lastGoodFile, recordsGoodStart, writeLastGood } from "../src/ops/last-good.js";
+import { isPackage, readRelease } from "../src/release.js";
+import { kitSync } from "./kit.js";
 
 const { values } = parseArgs({ options: { port: { type: "string", default: "3737" } }, strict: false });
 const port = Number(values.port);
@@ -25,11 +33,20 @@ const distDir = path.resolve(import.meta.dirname, "../dist/ui");
 const indexPath = path.join(distDir, "index.html");
 const repoDir = path.resolve(import.meta.dirname, "..");
 
+// PLA-I2-1: before anything is served, the devva engine must answer with this machine's token (the store has no
+// migrations to check). Otherwise one sentence and exit, instead of failing on first use.
+const dbProblem = await startupProblem(process.env);
+if (dbProblem) {
+  console.error(dbProblem);
+  process.exit(1);
+}
+
 // PLA-I46-1: a restart is a deploy. dist/ui used to be rebuilt only by a manual `pnpm build`, so a
 // restart on a newer HEAD kept serving the old bundle. Rebuild here when the stamp is not HEAD.
 // Only for the launchd server (3737); the dev API behind Vite never serves dist/ui.
 if ((port === 3737 && process.env.PLANIA_UI_BUILD !== "0") || process.env.PLANIA_UI_BUILD === "1") {
-  const reason = staleReason(readUiBuild(distDir), gitState(repoDir), existsSync(indexPath));
+  // PLA-I2-17: null in a release package, which serves its dist/ui as shipped.
+  const reason = rebuildReason(repoDir, distDir);
   if (reason) {
     console.log(`[ui] rebuilding dist/ui: ${reason}`);
     try {
@@ -55,7 +72,8 @@ const server = new Hono();
 // Which commit the screen is on, for a check after a deploy (no auth: it names a commit, nothing else).
 server.get("/health/ui", (c) => {
   c.header("Cache-Control", "no-store");
-  return c.json({ ui: readUiBuild(distDir), head: gitState(repoDir) });
+  // PLA-I2-17: and which release (the package manifest, or package.json and HEAD in a checkout).
+  return c.json(healthUi(repoDir, distDir));
 });
 server.route("/", app);
 
@@ -86,7 +104,44 @@ server.get("*", (c) => {
   return c.html(readFileSync(indexPath, "utf8"));
 });
 
-serve({ fetch: server.fetch, port, hostname }, () => console.log(`plania on http://localhost:${port}`));
+const http = serve({ fetch: server.fetch, port, hostname }, () => console.log(`plania on http://localhost:${port}`));
+// PLA-111 (F-39): a restart lets the requests in flight finish before the process exits.
+setHttpServer(http as never);
+// PLA-I2-9: still up after a while: this commit (or version) is the one a failed restart goes back to.
+if (recordsGoodStart(port)) {
+  setTimeout(() => {
+    try {
+      const r = readRelease(repoDir);
+      writeLastGood(lastGoodFile(), { commit: r.commit, version: r.version, packaged: isPackage(repoDir), root: repoDir, at: new Date().toISOString() });
+    } catch (e) {
+      console.log(`[restart] last good start not recorded: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, GOOD_AFTER_MS).unref();
+}
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.once(sig, () => exitAfterDrain(sig === "SIGINT" ? 130 : 143));
+// PLA-I2-19: under the Windows service the supervisor asks over IPC (no signals on Windows).
+drainOnParentRequest();
+
+// PLA-I2-14: the owner's display name, read once at start (setOwnerName keeps it current after that).
+void withDb((db) => loadOwnerName(db)).catch((e) => console.log(`[owner] name not loaded: ${e instanceof Error ? e.message : String(e)}`));
+
+// PLA-I2-2: the password, tokens, time zone and wakes the first-start screen stored. Read before the jobs start,
+// since an install made by first start has wakes on with PLANIA_JOBS unset.
+await withDb((db) => loadInstallState(db)).catch((e) => console.log(`[install] state not loaded: ${e instanceof Error ? e.message : String(e)}`));
+
+// PLA-152 (guided test 3): the agents read their role prompts from the live `Prompt: <role>` docs, which only a
+// kit sync writes. Deploys by git pull + restart never ran it, so merged kit/roles changes sat two weeks without
+// reaching a run. Each start syncs the repo's prompts (drift-safe: a doc the owner edited in Plania is left alone
+// and named). Only the real service (jobs on): a dev server on another branch must not push unmerged prompts.
+// PLANIA_KIT_SYNC=0 turns it off.
+if (process.env.PLANIA_KIT_SYNC !== "0" && process.env.PLANIA_JOBS !== "0") {
+  void withDb((db) => kitSync(db))
+    .then((r) => {
+      if (r.written.length) console.log(`[kit] prompts synced: ${r.written.join(", ")}`);
+      if (r.drift.length) console.log(`[kit] left alone, edited in Plania since the last sync: ${r.drift.join(", ")} (pnpm kit:status)`);
+    })
+    .catch((e) => console.log(`[kit] sync failed: ${e instanceof Error ? e.message : String(e)}`));
+}
 
 // Background jobs (lease warnings, legacy card archiving, later the pollers). PLANIA_JOBS=0 turns them off.
 if (process.env.PLANIA_JOBS !== "0") startJobs();
@@ -109,4 +164,8 @@ if (process.env.PLANIA_JOBS !== "0") {
 // PLA-I46-8: a test copy an earlier server left on (Encenderla) is stopped and its footprint released.
 void withDb((db) => reapOrphans(db))
   .then((n) => n > 0 && console.log(`[prueba] stopped ${n} test cop${n === 1 ? "y" : "ies"} left by an earlier server`))
-  .catch((e) => console.log(`[prueba] orphan reap failed: ${e instanceof Error ? e.message : String(e)}`));
+  .catch((e) => console.log(`[prueba] orphan reap failed: ${e instanceof Error ? e.message : String(e)}`))
+  // PLA-I72-1: the initiative copies it had on are listed again, off, with their base and worktree kept.
+  .then(() => withDb((db) => reconcileCopias(db)))
+  .then((n) => n && n > 0 && console.log(`[prueba] ${n} initiative cop${n === 1 ? "y" : "ies"} listed again, off`))
+  .catch(() => undefined);

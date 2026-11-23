@@ -145,7 +145,7 @@ test("the cookie read is the week, the roster, goals, stuck work and what waits 
   assert.equal(res.status, 200);
   const body = res.body;
   assert.equal(body.role, "CEO");
-  assert.equal(body.name, "Jorge");
+  assert.equal(body.name, "El dueño");
   const weekId = isoWeekKey(body.today);
   assert.equal(weekId, isoWeekOf(body.today));
   assert.equal(body.usage.label, "reportado");
@@ -198,7 +198,7 @@ test("the cookie read is the week, the roster, goals, stuck work and what waits 
   assert.equal(text.includes("token"), false);
 });
 
-test("PLANIA_CEO_NAME sets the greeting and a blank value stays Jorge", async () => {
+test("PLANIA_CEO_NAME sets the greeting and a blank value stays «El dueño» (PLA-I2-14)", async () => {
   const previous = process.env.PLANIA_CEO_NAME;
   try {
     process.env.PLANIA_CEO_NAME = "  Demo  ";
@@ -208,7 +208,7 @@ test("PLANIA_CEO_NAME sets the greeting and a blank value stays Jorge", async ()
     assert.equal(named.body.role, "CEO");
     process.env.PLANIA_CEO_NAME = " \n ";
     const blank = await get("/api/dashboard");
-    assert.equal(blank.body.name, "Jorge");
+    assert.equal(blank.body.name, "El dueño");
   } finally {
     if (previous === undefined) delete process.env.PLANIA_CEO_NAME;
     else process.env.PLANIA_CEO_NAME = previous;

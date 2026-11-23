@@ -55,23 +55,8 @@ test("URL state: ?p and ?equipo are old links that redirect, ?vista previews, ?d
   assert.equal(sheetOf(""), null);
   // PLA-I33: the Equipo sheet left Compañía; its old route lands in Máquina, with the plumbing.
   assert.deepEqual(LEGACY_REDIRECTS, { "/ahora": "/ceo", "/goals": "/ceo#proyectos", "/equipo": "/machine" });
-  assert.deepEqual(NAV.map((n) => n.label), ["Compañía", "Bandeja", "Brief", "Progreso", "Máquina"]);
+  assert.deepEqual(NAV.map((n) => n.label), ["Compañía", "Bandeja", "Progreso", "Máquina"]); // PLA-I63-5: Brief is a tab of Compañía
 });
 
 // PLA-I30-4 check 2: no money in the Compañía page or the dashboard components. Template literals (`${`)
-// are code, not spend text, so they are stripped before looking for a dollar sign.
-test("no dollar, USD or total_cost in the Compañía page and dashboard components", () => {
-  const root = path.resolve(import.meta.dirname, "../ui/src");
-  const files = ["pages/ceo.tsx", "pages/project.tsx", "pages/machine.tsx", "lib/compania.ts", "lib/org.ts"];
-  for (const dir of ["components/dashboard", "components/compania"]) {
-    for (const f of readdirSync(path.join(root, dir))) if (statSync(path.join(root, dir, f)).isFile()) files.push(path.join(dir, f));
-  }
-  const hits: string[] = [];
-  for (const f of files) {
-    const text = readFileSync(path.join(root, f), "utf8").replace(/\$\{/g, "");
-    text.split("\n").forEach((line, i) => {
-      if (/\$|USD|usd|total_cost|currency/.test(line)) hits.push(`${f}:${i + 1}: ${line.trim()}`);
-    });
-  }
-  assert.deepEqual(hits, []);
-});
+

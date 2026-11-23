@@ -90,7 +90,7 @@ describe("Orden on screen", () => {
     assert.equal(byCode("DECISION_CONTRADICTS_DONE").length, 1);
     for (const f of [...byCode("DECISION_STALE_REF"), ...byCode("DECISION_CONTRADICTS_DONE")]) {
       assert.equal(f.can_fix, "retire_decision");
-      assert.equal(f.owner, "jorge");
+      assert.equal(f.owner, "owner");
       assert.match(f.id, /^[0-9a-f-]{36}$/);
     }
     const branch = byCode("BRANCH_MERGED_NOT_DELETED")[0];
@@ -107,7 +107,7 @@ describe("Orden on screen", () => {
     }
     const after = (await api("GET", "/api/projects/workia/audit")).body;
     assert.equal(after.findings.filter((f: Json) => f.code.startsWith("DECISION_")).length, 0, "gone after three clicks");
-    const retired = (await store.find("decisions", { retiredAt: notNull() })).filter((d) => d.retiredBy?.agent === "jorge").length;
+    const retired = (await store.find("decisions", { retiredAt: notNull() })).filter((d) => d.retiredBy?.agent === "owner").length;
     assert.equal(retired, 3);
 
     const again = await api("POST", "/api/projects/workia/audit/fix", { code: "DECISION_STALE_REF", id: byCode("DECISION_STALE_REF")[0].id });
@@ -119,7 +119,7 @@ describe("Orden on screen", () => {
     assert.equal(deployed.status, 200);
     assert.ok(!deployed.body.findings.some((f: Json) => f.code === "ENV_DEPLOYED_AT_MISSING" && f.id === "sandbox"));
     const rows = (await store.find("envStates", { env: "sandbox" })).map((e) => ({ at: e.deployedAt !== null, provider: e.deploySource?.provider ?? null }));
-    assert.deepEqual(rows, [{ at: true, provider: "jorge" }]);
+    assert.deepEqual(rows, [{ at: true, provider: "owner" }]);
 
     // The home tiles carry the count.
     const tiles = (await api("GET", "/api/projects")).body as Json[];

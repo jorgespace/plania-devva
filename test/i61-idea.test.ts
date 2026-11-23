@@ -166,7 +166,7 @@ test("I61-3: the idea read has its six stops, each delivery, who and when; openi
   const d = await detail(key);
   assert.deepEqual(d.stops.map((s: Json) => s.stop), ["buzon", "entendido", "investigacion", "diseno", "plan", "lista"]);
   assert.deepEqual(d.stops.map((s: Json) => s.state), ["done", "done", "done", "done", "here", "todo"]);
-  assert.deepEqual(d.stops.map((s: Json) => s.by), ["jorge", "product-owner", "research", "artist", null, null]);
+  assert.deepEqual(d.stops.map((s: Json) => s.by), ["owner", "product-owner", "research", "artist", null, null]);
   assert.equal(d.pedido, true);
   assert.equal(d.unseen, 3);
   assert.equal(d.research.recommendation, "Opción 1 con el alcance de la 3.");
@@ -209,7 +209,7 @@ test("I61-4: me gusta marks the trail and undoes; pide cambios with notes sends 
   assert.match(woke[0]!, /artist/);
   const [last] = await store.find("events", { taskKey: key, type: "note" }, { orderBy: [{ column: "id", desc: true }], limit: 1 });
   const note = String((last!.payload as { text?: unknown }).text);
-  assert.match(note, /Jorge pide cambios en Diseño/);
+  assert.match(note, /El dueño pide cambios en Diseño/);
   assert.match(note, /Marco B1 \(Listado\), punto 52% desde la izquierda y 26% desde arriba: Los filtros ocupan media pantalla/);
   d = await detail(key);
   assert.deepEqual(d.stops.map((s: Json) => s.state), ["done", "done", "done", "here", "todo", "todo"]);

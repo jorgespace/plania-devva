@@ -4,7 +4,7 @@
 // throwaway DB; nothing reaches a real claude or repo.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -31,6 +31,9 @@ let store: TestStore;
 let db: Db;
 let closeDb: () => Promise<void>;
 const scratch = mkdtempSync(path.join(tmpdir(), "plania-i32-runner-"));
+// PLA-65: the seeded projects' checkouts live in the scratch folder, not in ~/Developer/Projects (absent on CI).
+const projectsDir = path.join(scratch, "projects");
+for (const slug of ["micasa", "workia", "filmia", "zigzag"]) mkdirSync(path.join(projectsDir, slug), { recursive: true });
 const A = { actor: { agent: "test-agent", session_id: "s-i32-runner" } };
 const jorge = () => ({ Cookie: `${SESSION_COOKIE}=${createSession()}`, "Content-Type": "application/json" });
 
@@ -52,7 +55,7 @@ function fakes() {
   const spawned: { args: string[]; cwd: string; child: FakeChild }[] = [];
   let pid = 50_000;
   const deps = {
-    env: { HOME: scratch, PATH: "/usr/bin:/bin", PLANIA_RUNNER_TOKEN: "runner-token", PLANIA_PROMPTS_PROJECT: "micasa", CLAUDE_CODE_BIN: "/fake/bin/claude" } as NodeJS.ProcessEnv,
+    env: { HOME: scratch, PLANIA_PROJECTS_ROOT: projectsDir, PATH: "/usr/bin:/bin", PLANIA_RUNNER_TOKEN: "runner-token", PLANIA_PROMPTS_PROJECT: "micasa", CLAUDE_CODE_BIN: "/fake/bin/claude" } as NodeJS.ProcessEnv,
     logDir: path.join(scratch, "logs"),
     tmpDir: path.join(scratch, "tmp"),
     worktreeRoot: path.join(scratch, "worktrees"),
@@ -160,7 +163,7 @@ test("I32-5 #1: Jorge's message wakes Asistente; the queued run starts, runs wit
   assert.equal(drained.started, 1, "home project zigzag is paused; Asistente runs anyway");
   const prompt = f.spawned[0]!.args[f.spawned[0]!.args.indexOf("-p") + 1]!;
   assert.match(prompt, /chief of staff/);
-  assert.match(prompt, /Why you woke: message from Jorge\./);
+  assert.match(prompt, /Why you woke: message from the owner\./);
   assert.match(prompt, /thread_read company/);
   // Asistente never merges: the deny rules every run gets hold for it too.
   assert.ok(DENY_RULES.includes("Bash(gh pr merge*)"));
@@ -210,7 +213,7 @@ test("PLA-I41-6 check 4: no Asistente brief run is ever queued; the Morning brie
   assert.deepEqual(briefs, ["2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13"].map((d) => ({ d, trigger: "schedule" })), "one scheduled Morning brief a day");
   assert.deepEqual(spawned, Array(4).fill(["brief", "ideas"]).flat(), "pass A then pass B, once a day");
   const ev = (await store.find("events", { type: "asistente.brief" }, { orderBy: [{ column: "id" }] })).map((r) => r.payload);
-  assert.ok(ev.length >= 4 && ev.every((p) => p.source === "morning_brief" && p.link === "/brief"), "Brief de hoy is the 0-token projection");
+  assert.ok(ev.length >= 4 && ev.every((p) => p.source === "morning_brief" && p.link === "/ceo?v=brief"), "Brief de hoy is the 0-token projection");
   assert.equal((await companyMessages()).some((m) => m.body.startsWith("Resumen del servidor")), false, "no free-text summary in the company thread");
 });
 
@@ -222,6 +225,11 @@ test("I32-5 #2: a PO's ticket In review that Jorge asked for, with its checks do
   // Not yet: a check is open.
   assert.equal(await asistente.routineAccept(db, new Date()), 0);
   await store.fix((uow) => uow.update("checks", { taskId: t!.id }, { done: true, doneAt: uow.now }));
+  // PLA-156: not while it carries a PR: code goes through the owner's card and merge.
+  await store.fix((uow) => uow.update("tasks", { key }, { prUrl: "https://github.com/o/r/pull/71" }));
+  assert.equal(await asistente.routineAccept(db, new Date()), 0, "a ticket with a PR is never auto-accepted");
+  assert.equal((await store.get("tasks", { key }))!.status, "In review");
+  await store.fix((uow) => uow.update("tasks", { key }, { prUrl: null }));
   // A PO line about it, which loses its buttons once accepted.
   const micasa = await pid("micasa");
   await store.fix(async (uow) => {
@@ -231,7 +239,7 @@ test("I32-5 #2: a PO's ticket In review that Jorge asked for, with its checks do
   });
   // An unrelated ticket of Taller's in review stays untouched.
   const other = (await writes.createTask(db, { project: "micasa", title: "Código", scope: "s", checks: ["c"], work_type: "ops", owner_agent: "taller-micasa" } as never, A)) as { key: string };
-  const [o] = await store.fix((uow) => uow.update("tasks", { key: other.key }, { status: "In review", origin: "jorge" }));
+  const [o] = await store.fix((uow) => uow.update("tasks", { key: other.key }, { status: "In review", origin: "owner" }));
   await store.fix((uow) => uow.update("checks", { taskId: o!.id }, { done: true }));
 
   const out = await asistente.runAsistente(db, new Date("2026-11-13T20:00:00Z"), wakesOn);

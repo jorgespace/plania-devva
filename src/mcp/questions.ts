@@ -1,6 +1,8 @@
 import type { Db } from "../db/client.js";
 import { LEGACY_ASK_FIELD } from "../db/legacy-names.js";
 import type { decisions, delegatedAnswers, questions, Actor, Task } from "../db/schema.js";
+import { LIVE } from "../runner/admission.js";
+import { runPrefixOf } from "../runner/run-session.js";
 import { readerOf, uowOf } from "../store/port.js";
 import type { Reader, UnitOfWork } from "../store/types.js";
 import { decisionShape } from "./decisions.js";
@@ -15,7 +17,7 @@ export type AnswerDelegation = { messageId: string; quote: string; actor: Actor 
 
 export type DelegatedView = { message_id: string; quote: string; at: string; by: Actor };
 
-// Questions for Jorge live in Plania, not in one session's chat. ask puts a ticket in Needs Jorge
+// Questions for the owner live in Plania, not in one session's chat. ask puts a ticket in Needs owner
 // (initiatives keep their status); answer records the reply, logs a decision on the task when the
 // caller gives decision_text and, once no question is left open, puts the ticket back where it was.
 
@@ -33,7 +35,7 @@ export function questionShape(q: QuestionRow, taskKey: string, delegated?: Deleg
     answered_by: q.answeredBy,
     answered_at: iso(q.answeredAt),
     decision_id: q.decisionId,
-    // 2.8: what else waits on this answer, and how soon Jorge is needed.
+    // 2.8: what else waits on this answer, and how soon the owner is needed.
     blocks: q.blocks,
     urgency: q.urgency,
     human_only: q.humanOnly,
@@ -111,11 +113,11 @@ export async function ask(
       if (!blocks.includes(b.key)) blocks.push(b.key);
     }
     if ((TERMINAL as readonly string[]).includes(t.status)) {
-      throw new ToolError("INVALID_TRANSITION", { from: t.status, to: "Needs Jorge", hint: "the task is closed" });
+      throw new ToolError("INVALID_TRANSITION", { from: t.status, to: "Needs owner", hint: "the task is closed" });
     }
     const options = input.options ?? [];
-    const moves = t.kind === "ticket" && t.status !== "Needs Jorge";
-    if (moves) assertTransition(t.kind, t.status, "Needs Jorge", { via: "ask" });
+    const moves = t.kind === "ticket" && t.status !== "Needs owner";
+    if (moves) assertTransition(t.kind, t.status, "Needs owner", { via: "ask" });
     const humanOnly = input.human_only ?? false;
     const q = await uow.insert("questions", {
       projectId: p.id,
@@ -129,14 +131,14 @@ export async function ask(
       askedBy: ctx.actor,
     });
     if (moves) {
-      // The lease stays: the asker keeps the ticket while Jorge thinks (heartbeat to keep it).
-      await moveStatus(uow, t.id, "Needs Jorge");
-      await emit("task.status", t, { from: t.status, to: "Needs Jorge" });
+      // The lease stays: the asker keeps the ticket while the owner thinks (heartbeat to keep it).
+      await moveStatus(uow, t.id, "Needs owner");
+      await emit("task.status", t, { from: t.status, to: "Needs owner" });
     }
     await emit("question.asked", t, { question_id: q.id, question: q.question, options: q.options, blocks: q.blocks, urgency: q.urgency, human_only: q.humanOnly });
     const u = await requireTask(tx, p.id, t.key);
     // 2.13: the reply says where the wait now lives, so nobody also writes it into next_action or a note.
-    const waits = u.status === "Needs Jorge" ? "the ticket waits in Needs Jorge until he answers" : "the question waits in Jorge's inbox until he answers";
+    const waits = u.status === "Needs owner" ? "the ticket waits in Needs owner until they answer" : "the question waits in the owner's inbox until they answer";
     return writeReply(tx, u, ctx, moves ? ["questions", "status"] : ["questions"], {
       question_id: q.id,
       waits,
@@ -226,9 +228,19 @@ export async function answerInTx(
   const first = asked.find((x) => x.statusBefore !== null);
   const stillOpen = asked.some((x) => x.answeredAt === null);
   const changed = ["questions"];
-  if (t.status === "Needs Jorge" && !stillOpen) {
+  if (t.status === "Needs owner" && !stillOpen) {
     let to = first?.statusBefore ?? "Ready";
-    if (to === "In progress" && !liveOwner(t)) to = "Ready";
+    // PLA-160 (F-33): the run that asked has usually ended, but its lease runs on for ~25 minutes, and the run the
+    // answer wakes writes under a new session: it could not claim the ticket and waited. A runner run that is no
+    // longer live gives its claim back here, so the woken run claims at once. A live run, or a person, keeps it.
+    let owner = liveOwner(t);
+    if (owner && (await deadRunOwner(tx, owner))) {
+      await uow.update("tasks", { id: t.id }, { owner: null, claimedAt: null, leaseUntil: null });
+      await emit("claim.released", t, { owner: t.owner, reason: "answered" });
+      owner = null;
+      changed.push("claim");
+    }
+    if (to === "In progress" && !owner) to = "Ready";
     assertTransition(t.kind, t.status, to, { via: "answer" });
     await moveStatus(uow, t.id, to);
     await emit("task.status", t, { from: t.status, to });
@@ -239,4 +251,14 @@ export async function answerInTx(
     question: questionShape(answered!, t.key, stamp),
     decision: d ? decisionShape(d, t.key) : null,
   });
+}
+
+// PLA-160: a claim held by a runner session whose run is no longer starting or running. Unknown runs stay held.
+async function deadRunOwner(tx: Q, owner: Actor): Promise<boolean> {
+  const prefix = runPrefixOf(owner.session_id);
+  if (!prefix) return false;
+  // The newest run whose id (dashes removed) starts with the prefix.
+  const runs = await readerOf(tx).find("agentRuns", {}, { orderBy: [{ column: "queuedAt", desc: true }] });
+  const run = runs.find((r) => r.id.replace(/-/g, "").startsWith(prefix));
+  return !!run && !(LIVE as readonly string[]).includes(run.status);
 }

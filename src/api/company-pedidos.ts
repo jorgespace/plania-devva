@@ -1,12 +1,15 @@
 // PLA-I54-1 (Pedidos con recorrido, design doc of PLA-IDEA19): Pedir's «Darle forma». The owner's request becomes an
-// idea (kind idea, stage idea, origin jorge, owned by the project's PO) that the PO shapes with him watching, and the
+// idea (kind idea, stage idea, origin owner, owned by the project's PO) that the PO shapes with him watching, and the
 // floor draws the project's open ones as capsules in a tube under the stage board.
 //   Stops   buzon (stage idea, no «Entendí» note), entendido (stage idea with it), investigacion, diseno, plan, lista
 //           (stages research, design, planning, ready).
 //   States  espera (an open question on it), trabajando (a live run on it), cola (in the buzón and no run ever took
-//           it), quieta (the rest). PLA-I54-4 adds valvula (Jorge said «Constrúyelo»; not promoted yet).
+//           it), quieta (the rest). PLA-I54-4 adds valvula (the owner said «Constrúyelo»; not promoted yet).
 // The trail is the idea's own event log, docs and questions: no new table (only F2's images have one).
 // An idea that was promoted (promoted_to set), dropped (Won't do) or done leaves the tube.
+import { ownerName } from "../owner.js";
+import { defineWords, say } from "../words.js";
+import { placeEn } from "./places.js";
 import type { Db } from "../db/client.js";
 import type { Agent, Task } from "../db/schema.js";
 import { findProject } from "../mcp/queries.js";
@@ -15,6 +18,7 @@ import { createTaskInTx } from "../mcp/writes.js";
 import { eventWakesEnabled, queueWake } from "../runner/events.js";
 import { readerOf, uowOf } from "../store/port.js";
 import { understoodOf } from "./company-orders.js";
+import { ownerEs } from "../owner.js";
 
 export type PedidoMode = "forma" | "ya";
 export type PedidoStop = "buzon" | "entendido" | "investigacion" | "diseno" | "plan" | "lista";
@@ -52,17 +56,45 @@ const STAGE_ROLE: Record<string, string> = { idea: "product-owner", research: "r
 export const stopOf = (stage: string | null, understood: boolean): PedidoStop => STAGE_STOP[stage ?? ""] ?? (understood ? "entendido" : "buzon");
 
 // What the PO reads on the idea (its scope). The PO's run prompt says it is an idea, not a ticket (runner.ts).
+// PLA-I2-10: the idea's scope and the PO's wake reason in the install's language (the Spanish is unchanged). The
+// owner's words are also the idea's owner_words field (askedText reads it first). `from` is a place as the callers
+// name it, in Spanish (places.ts says it in English).
+export const IDEA_SCOPE_WORDS = defineWords({
+  es: {
+    scope: (sentence: string, from: string) =>
+      [
+        `Pedido ${ownerEs("de")} desde ${from} (Darle forma): "${sentence}"`,
+        "",
+        `Para el PO: esto es una idea, no un ticket. ${ownerEs(undefined, { capital: true })} la sigue en el tubo de su piso y la forma contigo.`,
+        "1. Escribe una nota `Entendí: …` sobre esta idea (set_task note) con lo que entendiste, en una línea.",
+        // AUDIT-8: the stage is delivered as data, and what is unclear goes with it as closed questions that nothing waits on.
+        "2. Lo que no esté claro va como `decisions` en tu entrega: una pregunta cerrada, de 2 a 4 opciones y la que recomiendas. Se aplica tu recomendación salvo que " + ownerEs() + " la cambie en la pantalla; nada lo espera. Usa `ask` solo cuando no puedas recomendar ninguna opción.",
+        "3. Entrega tus etapas con `deliver_stage`: en idea, problem, who, why_now y decisions; en planning, steps (cada uno con done_when y try_it), risks y size. Plania revisa lo que dicen y escribe el doc; no lo escribas con attach_doc.",
+        "4. Mueve la etapa (set_task stage) cuando esté entregada: idea → research → design → planning → ready. Research y Artist despiertan solos en sus etapas.",
+        "5. Nunca crees tickets para Taller ni una iniciativa desde esta idea, y no pongas promoted_to: en Lista se queda quieta. Solo " + ownerEs() + " la manda construir con «Constrúyelo» en la pantalla; entonces Plania te despierta con esa orden.",
+      ].join("\n"),
+    wakeReason: () => `pedido ${ownerEs("de")} para darle forma`,
+  },
+  en: {
+    scope: (sentence: string, from: string) => {
+      const owner = ownerName("en");
+      return [
+        `Request from ${owner} via ${placeEn(from)} (Shape it): "${sentence}"`,
+        "",
+        `For the PO: this is an idea, not a ticket. ${ownerName("en", { capital: true })} follows it in the tube on their floor and shapes it with you.`,
+        "1. Write a note `Understood: …` on this idea (set_task note) with what you understood, in one line.",
+        `2. What is unclear goes as \`decisions\` in your delivery: a closed question, 2 to 4 options and the one you recommend. Your recommendation applies unless ${owner} changes it on the screen; nothing waits on it. Use \`ask\` only when you cannot recommend any option.`,
+        "3. Deliver your stages with `deliver_stage`: for idea, problem, who, why_now and decisions; for planning, steps (each with done_when and try_it), risks and size. Plania checks what they say and writes the doc; do not write it with attach_doc.",
+        "4. Move the stage (set_task stage) once it is delivered: idea → research → design → planning → ready. Research and Artist wake on their own at their stages.",
+        `5. Never create tickets for Taller or an initiative from this idea, and do not set promoted_to: at Ready it stays put. Only ${owner} sends it to be built with «Build it» on the screen; then Plania wakes you with that order.`,
+      ].join("\n");
+    },
+    wakeReason: () => `request from ${ownerName("en")} to shape`,
+  },
+});
+
 export function ideaScope(sentence: string, from = "Compañía"): string {
-  return [
-    `Pedido de Jorge desde ${from} (Darle forma): "${sentence}"`,
-    "",
-    "Para el PO: esto es una idea, no un ticket. Jorge la sigue en el tubo de su piso y la forma contigo.",
-    "1. Escribe una nota `Entendí: …` sobre esta idea (set_task note) con lo que entendiste, en una línea.",
-    "2. Lo que no esté claro, pregúntalo con `ask` sobre esta idea; Jorge contesta en la pantalla.",
-    "3. Llena el doc de la idea (attach_doc, título «Idea») con los encabezados que Plania pide (## Problem, ## Who it is for, ## Why now) y los de su ficha: ## Tamaño, ## Solución, ## Riesgos, ## Fuera.",
-    "4. Mueve la etapa (set_task stage) cuando su doc esté: idea → research → design → planning → ready. Research y Artist despiertan solos en sus etapas.",
-    "5. Nunca crees tickets para Taller ni una iniciativa desde esta idea, y no pongas promoted_to: en Lista se queda quieta. Solo Jorge la manda construir con «Constrúyelo» en la pantalla; entonces Plania te despierta con esa orden.",
-  ].join("\n");
+  return say(IDEA_SCOPE_WORDS).scope(sentence, from);
 }
 
 const firstLine = (text: string) => {
@@ -77,11 +109,11 @@ export async function createPoIdea(db: Db, slug: string, po: Agent, text: string
   const p = await findProject(db, slug);
   const title = firstLine(sentence);
   return writeTx(db, p, { ...webCtx, tool: "company.ask" }, async (tx, emit) => {
-    const out = (await createTaskInTx(tx, emit, p, { project: slug, kind: "idea", title, scope: ideaScope(sentence, from), owner_agent: po.slug }, { ...webCtx, tool: "company.ask" })) as { key: string };
+    const out = (await createTaskInTx(tx, emit, p, { project: slug, kind: "idea", title, scope: ideaScope(sentence, from), owner_agent: po.slug, owner_words: sentence }, { ...webCtx, tool: "company.ask" })) as { key: string };
     // origin is a ticket field on create_task; on screen an idea the owner asked for carries it too (the tube's filter).
-    const [t] = await uowOf(tx).update("tasks", { projectId: p.id, key: out.key }, { origin: "jorge" });
+    const [t] = await uowOf(tx).update("tasks", { projectId: p.id, key: out.key }, { origin: "owner" });
     if (!eventWakesEnabled()) return { key: out.key, title, wake: "off" as const };
-    const w = await queueWake(tx, p, { id: t!.id, key: t!.key }, { agent: po, taskKey: out.key, reason: "pedido de Jorge para darle forma" }, "company.ask");
+    const w = await queueWake(tx, p, { id: t!.id, key: t!.key }, { agent: po, taskKey: out.key, reason: say(IDEA_SCOPE_WORDS).wakeReason() }, "company.ask");
     return { key: out.key, title, wake: w.kind === "queued" ? ("queued" as const) : ("busy" as const) };
   });
 }
@@ -103,7 +135,7 @@ async function ordered(db: Db, ids: string[]): Promise<Set<string>> {
 }
 
 export async function openIdeasOf(db: Db, projectId: string): Promise<Task[]> {
-  return readerOf(db).find("tasks", { projectId, kind: "idea", origin: "jorge", status: "Open", promotedTo: null }, { orderBy: [{ column: "createdAt" }] });
+  return readerOf(db).find("tasks", { projectId, kind: "idea", origin: "owner", status: "Open", promotedTo: null }, { orderBy: [{ column: "createdAt" }] });
 }
 
 // PLA-I61-6: what La idea abierta marks «sin ver», counted for the tube, Ahora and the sky. A stop's delivery is its
@@ -166,7 +198,7 @@ export async function pedidoOf(db: Db, projectId: string, t: Task, facts?: { run
   };
 }
 
-async function factsOf(db: Db, projectId: string, rows: Task[]) {
+export async function factsOf(db: Db, projectId: string, rows: Task[]) {
   const keys = rows.map((t) => t.key);
   const runs = keys.length ? (await readerOf(db).find("agentRuns", { projectId, taskKey: keys })).map((r) => ({ key: r.taskKey, status: r.status, role: r.role })) : [];
   return {
@@ -177,7 +209,7 @@ async function factsOf(db: Db, projectId: string, rows: Task[]) {
   };
 }
 
-// The company payload's pedidos for one project: open ideas with origin jorge, oldest first, shelved ones included
+// The company payload's pedidos for one project: open ideas with origin owner, oldest first, shelved ones included
 // (guardada: true) so the tube can count Guardadas.
 export async function pedidosOf(db: Db, projectId: string): Promise<Pedido[]> {
   const rows = await openIdeasOf(db, projectId);
