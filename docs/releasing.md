@@ -54,7 +54,7 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 `.github/workflows/release.yml` runs on a `v*` tag. It first runs the clean-machine install
-(`.github/workflows/install.yml`, below) on Linux, macOS and Windows; then it checks the tag names `package.json`'s
+(`.github/workflows/install.yml`, below) on Linux; then it checks the tag names `package.json`'s
 version, packs with `PLANIA_DOWNLOAD_BASE=https://github.com/Jorg3L3on/plania/releases/download/v<version>` and
 uploads to the release:
 
@@ -117,19 +117,20 @@ the tests (no Docker check, no engine).
 
 ## The clean-machine install in CI
 
-`.github/workflows/install.yml` packs the release on Linux, then on an `ubuntu-latest`, `macos-latest` and
-`windows-latest` runner removes the runner's own Postgres, runs the real installer (`--from <package> --yes
---no-open`; Windows PowerShell 5.1 on Windows), checks that `http://localhost:3737/health/ui` answers and
-`/primer-arranque` serves the screen, and runs `pnpm uninstall:plania --delete-data`. It runs on pushes to `jl/**`,
-on pull requests that touch the installers, by hand, and before every release. Claude Code is not on the runners; the
-install goes on without it, as it does for a person. A macOS runner has 7 GB of memory, under Plania's 8, so the job
-sets `PLANIA_UNSUPPORTED_SKIP_CHECK=memory`: a comma-separated list of machine-check items the install lets
-pass when they are missing. It exists for that job and is read only on a GitHub Actions runner (`GITHUB_ACTIONS=true`),
-so it does nothing on a user's machine.
+`.github/workflows/install.yml` packs the release on Linux, then on an `ubuntu-latest` runner pulls the devva engine's
+image, runs the real installer (`--from <package> --yes --no-open`), which starts the engine with Docker from the
+package's compose file, checks that `http://localhost:3737/health/ui` answers, `/primer-arranque` serves the screen and
+`.env` names the store's prefix, and runs `pnpm uninstall:plania --delete-data`. It runs on pushes to `jl/**`, on pull
+requests that touch the installers, by hand, and before every release. Claude Code is not on the runner; the install
+goes on without it, as it does for a person. The job sets `PLANIA_UNSUPPORTED_SKIP_CHECK=memory`: a comma-separated
+list of machine-check items the install lets pass when they are missing. It exists for that job and is read only on a
+GitHub Actions runner (`GITHUB_ACTIONS=true`), so it does nothing on a user's machine.
 
-That job was written while Plania's data was in Postgres. With the data in a devva engine, a runner needs Docker and
-the engine's image for the installer to start it; until the job provides them, the installer stops at the engine step
-there.
+Only Linux runs it: GitHub's macOS runners have no Docker and its Windows runners run Windows containers only, so the
+install on macOS and on Windows is tried by hand before a release (below). The engine's image is not public: set the
+repository variable `DEVVA_IMAGE` to an image the runner can pull (on `ghcr.io`, the workflow's own token signs in).
+Without it the job, and the test and canary jobs in `.github/workflows/ci.yml`, warn that they did not run; the
+build in `ci.yml` (both type-checks and the screen, on Linux and macOS) runs either way.
 
 To try a release before it is published:
 
