@@ -66,6 +66,21 @@ plania's projection needed nothing rewritten.
 There is also the engine's hot snapshot (`devva-cli admin snapshot`), a copy of its files. The engine image
 does not ship `devva-cli`, so plania does not use it.
 
+## Moving a machine from Postgres
+
+A machine that ran `main` keeps its data in Postgres. To bring it over, before plania first starts on devva and
+with the server stopped:
+
+```bash
+pnpm devva:from-postgres postgres://postgres@127.0.0.1:5432/plania --dry-run
+pnpm devva:from-postgres postgres://postgres@127.0.0.1:5432/plania
+```
+
+The first prints what each table holds and what the copy fills or leaves behind (a column from a migration the
+database never got is filled with its default; a column the schema dropped is not copied). The second copies
+every row, with its ids and timestamps, into the store `.env` names, then compares each table's count. Postgres is
+only read. The store must hold no commit: a copy that stopped halfway goes to a new `PLANIA_DEVVA_PREFIX`.
+
 ## Search
 
 `PLANIA_SEARCH=devva` adds the `search` tool: the tickets, docs and decisions of one project closest in

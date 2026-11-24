@@ -24,6 +24,7 @@
     "vapid": "tsx scripts/vapid.ts",
     "scan:diff": "tsx scripts/scan-diff.ts",
     "scan:hashes": "tsx scripts/scan-hashes.ts",
+    "devva:from-postgres": "tsx --env-file=.env scripts/devva-from-postgres.ts",
     "devva:load": "tsx --env-file=.env scripts/devva-load.ts",
     "devva:owner-neutral": "tsx --env-file=.env scripts/devva-owner-neutral.ts",
     "capture": "tsx --env-file=.env scripts/capture.ts",
