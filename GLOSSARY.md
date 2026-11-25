@@ -118,7 +118,6 @@ Which screen names keep their Spanish form in English is in [docs/screen-words.m
 | Máquinas | A project's services on the Mac: how its app starts, what is running, the test copies. |
 | Novedades | The page with the notes of the last Plania update. |
 | Calidad | The quality scoreboard: how runs ended, what QA returned, how long things took. |
-| Progreso | What was closed, by day, project and year. |
 | Aceptar | The owner's click that merges a delivery into the test copy. |
 | Pedir cambios | The owner's click that sends a delivery back to Taller with what to change. |
 | Delegada | The badge on an answer the Plania bot recorded for the owner, quoting the owner's message. |

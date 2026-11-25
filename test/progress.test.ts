@@ -1,14 +1,13 @@
 // PLA-I19-1: day buckets in America/Mexico_City, streak, Won't do and [PRUEBA] excluded,
-// a reopen counted once, bearer rejected, year summary under 500ms.
+// a reopen counted once, year summary under 500ms. PLA-I1-2: the Progreso page and its /api/progress routes are gone;
+// the engine stays (the dashboard and Compañía read it), so these call it directly.
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
-import { TEST_BEARER, resetTestStore, useTestEnv, type TestStore } from "./helpers.js";
+import { resetTestStore, useTestEnv, type TestStore } from "./helpers.js";
 
 useTestEnv();
 process.env.PLANIA_TZ = "America/Mexico_City";
 
-const { app } = await import("../src/app.js");
-const { createSession, SESSION_COOKIE } = await import("../src/auth/session.js");
 const { makeDb } = await import("../src/db/client.js");
 const {
   addDays,
@@ -18,7 +17,6 @@ const {
   isoWeek,
   isPruebaTitle,
   pairImages,
-  progressItem,
   progressLog,
   progressSummary,
   streakOf,
@@ -27,14 +25,18 @@ const {
 
 type Json = Record<string, any>;
 let store: TestStore;
-const cookie = `${SESSION_COOKIE}=${createSession()}`;
 const actor = { agent: "t", session_id: "s" };
 
-const get = async (path: string, headers: Record<string, string> = {}) => {
-  const res = await app.request(path, { headers: { Cookie: cookie, ...headers } });
-  const body = (await res.json()) as Json;
-  return { status: res.status, body };
+const withDb = async <T>(fn: (db: ReturnType<typeof makeDb>["db"]) => Promise<T>): Promise<T> => {
+  const { db, close } = makeDb();
+  try {
+    return await fn(db);
+  } finally {
+    await close();
+  }
 };
+const summary = async (input: { range: string; date?: string }) => ({ body: (await withDb((db) => progressSummary(db, input))) as Json });
+const log = async (input: Parameters<typeof progressLog>[1]) => ({ body: (await withDb((db) => progressLog(db, input))) as Json });
 
 before(async () => {
   store = await resetTestStore();
@@ -156,10 +158,9 @@ describe("pure day math", () => {
   });
 });
 
-describe("progress API", () => {
+describe("progress engine", () => {
   test("midnight boundary, Won't do and [PRUEBA] excluded, reopen counted once", async () => {
-    const tenth = await get("/api/progress/summary?range=day&date=2026-03-10");
-    assert.equal(tenth.status, 200);
+    const tenth = await summary({ range: "day", date: "2026-03-10" });
     assert.equal(tenth.body.finished, 5);
     assert.equal(tenth.body.bugs, 1);
     assert.equal(tenth.body.initiatives, 1);
@@ -171,53 +172,44 @@ describe("progress API", () => {
     assert.equal(keys.has("FIL-P"), false);
     assert.equal(keys.has("FIL-W"), false);
 
-    const eleventh = await get("/api/progress/summary?range=day&date=2026-03-11");
+    const eleventh = await summary({ range: "day", date: "2026-03-11" });
     assert.equal(eleventh.body.finished, 1);
     assert.equal(eleventh.body.prs, 1);
     assert.equal(eleventh.body.buckets[0].total, 1);
-
-    const { db, close } = makeDb();
-    try {
-      const direct = await progressSummary(db, { range: "day", date: "2026-03-10" });
-      assert.equal(direct.finished, 5);
-    } finally {
-      await close();
-    }
   });
 
   test("streak ignores a [PRUEBA] day in the gap", async () => {
     const today = dayInTz(new Date());
-    const summary = await get(`/api/progress/summary?range=day&date=${today}`);
-    assert.equal(summary.body.streak.current, 5);
+    const day = await summary({ range: "day", date: today });
+    assert.equal(day.body.streak.current, 5);
     const { bestYear } = streakOf(
       [...[0, 1, 2, 3, 4].map((n) => addDays(today, -n)), ...[6, 7, 8, 9, 10, 11, 12].map((n) => addDays(today, -n))],
       today,
       Number(today.slice(0, 4)),
     );
-    assert.equal(summary.body.streak.best_year, bestYear);
-    assert.equal(summary.body.streak.week.filter((d: Json) => d.date === today)[0].active, true);
+    assert.equal(day.body.streak.best_year, bestYear);
+    assert.equal(day.body.streak.week.filter((d: Json) => d.date === today)[0].active, true);
   });
 
   test("week label is SEMANA 44", async () => {
-    const summary = await get("/api/progress/summary?range=week&date=2026-10-26");
-    assert.equal(summary.body.label, "SEMANA 44 · 26 OCT – 1 NOV");
-    assert.equal(summary.body.buckets.length, 7);
-    assert.equal(summary.body.heatmap.length, 53 * 7);
+    const week = await summary({ range: "week", date: "2026-10-26" });
+    assert.equal(week.body.label, "SEMANA 44 · 26 OCT – 1 NOV");
+    assert.equal(week.body.buckets.length, 7);
+    assert.equal(week.body.heatmap.length, 53 * 7);
   });
 
   test("log filters combine, and an idea is listed but not counted as a cosa", async () => {
-    const log = await get("/api/progress/log?from=2026-09-15&to=2026-09-15&project=filmia&type=bug&q=login");
-    assert.equal(log.status, 200);
-    assert.deepEqual(log.body.days[0].entries.map((e: Json) => e.key), ["FIL-B2"]);
+    const bugs = await log({ from: "2026-09-15", to: "2026-09-15", project: "filmia", type: "bug", q: "login" });
+    assert.deepEqual(bugs.body.days[0].entries.map((e: Json) => e.key), ["FIL-B2"]);
     // Chips ignore the type filter, so the same project and search still show the feature.
-    assert.equal(log.body.counts.bug, 1);
-    assert.equal(log.body.counts.code, 1);
-    assert.equal(log.body.counts.all, 2);
+    assert.equal(bugs.body.counts.bug, 1);
+    assert.equal(bugs.body.counts.code, 1);
+    assert.equal(bugs.body.counts.all, 2);
 
-    const byNumber = await get("/api/progress/log?from=2026-09-15&to=2026-09-15&q=%23293");
+    const byNumber = await log({ from: "2026-09-15", to: "2026-09-15", q: "#293" });
     assert.equal(byNumber.body.days[0].entries.some((e: Json) => e.key === "FIL-EMPTY"), true);
 
-    const march = await get("/api/progress/log?from=2026-03-10&to=2026-03-10");
+    const march = await log({ from: "2026-03-10", to: "2026-03-10" });
     const marchKeys = march.body.days.flatMap((d: Json) => d.entries.map((e: Json) => e.key ?? e.title));
     assert.equal(marchKeys.includes("FIL-IDEA"), true);
     assert.equal(marchKeys.includes("FIL-P"), false);
@@ -228,43 +220,19 @@ describe("progress API", () => {
     assert.equal(initiative.child_done, 1);
   });
 
-  test("item uses the decision when the summary is empty, and only visual links", async () => {
-    const item = await get("/api/progress/item/filmia/FIL-EMPTY");
-    assert.equal(item.status, 200);
-    assert.equal(item.body.change, "Se acepta cualquier cliente registrado");
-    assert.equal(item.body.images.before, "https://example.com/before.png");
-    assert.equal(item.body.images.after, "https://example.com/after.png");
-    assert.equal(item.body.images.all.includes("https://example.com/not-visual.png"), false);
-    assert.equal(item.body.prs[0].number, 293);
-    assert.equal(item.body.type, "bug");
+  test("an entry uses the decision when the summary is empty, and only visual links", async () => {
+    const day = await log({ from: "2026-09-15", to: "2026-09-15", q: "#293" });
+    const entry = day.body.days[0].entries.find((e: Json) => e.key === "FIL-EMPTY");
+    assert.equal(entry.change, "Se acepta cualquier cliente registrado");
+    assert.equal(entry.images.before, "https://example.com/before.png");
+    assert.equal(entry.images.after, "https://example.com/after.png");
+    assert.equal(entry.images.all.includes("https://example.com/not-visual.png"), false);
+    assert.equal(entry.images.all.length, 2);
+    assert.equal(entry.prs[0].number, 293);
+    assert.equal(entry.type, "bug");
 
-    const hidden = await get("/api/progress/item/filmia/FIL-P");
-    assert.equal(hidden.status, 404);
-    const missing = await get("/api/progress/item/nope/FIL-1");
-    assert.equal(missing.status, 404);
-
-    const { db, close } = makeDb();
-    try {
-      const direct = await progressItem(db, "filmia", "FIL-EMPTY");
-      assert.equal(direct.images.all.length, 2);
-      const listed = await progressLog(db, { from: "2026-09-15", to: "2026-09-15", project: "micasa", type: "bug", q: "login" });
-      assert.deepEqual(listed.days[0]?.entries.map((e) => e.key), ["MIC-B2"]);
-    } finally {
-      await close();
-    }
-  });
-
-  test("a bearer is 401 with or without the screen cookie", async () => {
-    const withBoth = await get("/api/progress/summary?range=week", { Authorization: `Bearer ${TEST_BEARER}` });
-    assert.equal(withBoth.status, 401);
-    const bearerOnly = await app.request("/api/progress/log", { headers: { Authorization: `Bearer ${TEST_BEARER}` } });
-    assert.equal(bearerOnly.status, 401);
-    const item = await app.request("/api/progress/item/filmia/FIL-B", { headers: { Authorization: `Bearer ${TEST_BEARER}`, Cookie: cookie } });
-    assert.equal(item.status, 401);
-    const none = await app.request("/api/progress/summary?range=day");
-    assert.equal(none.status, 401);
-    const bad = await get("/api/progress/summary?range=hour");
-    assert.equal(bad.status, 400);
+    const listed = await log({ from: "2026-09-15", to: "2026-09-15", project: "micasa", type: "bug", q: "login" });
+    assert.deepEqual(listed.body.days[0]?.entries.map((e: Json) => e.key), ["MIC-B2"]);
   });
 
   test("year summary stays under 500ms", async () => {

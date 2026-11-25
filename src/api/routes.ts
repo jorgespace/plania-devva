@@ -38,7 +38,6 @@ import { readerOf } from "../store/port.js";
 import { gt, type Row } from "../store/types.js";
 import { teamRoutes } from "./team.js";
 import { goalsApi } from "./goals.js";
-import { progressRoutes } from "./progress.js";
 import { delegationRoutes } from "./delegation.js";
 import { dashboardRoutes } from "./dashboard.js";
 import { usageRoutes } from "./usage.js";
@@ -794,7 +793,6 @@ api.get("/events", (c) =>
 
 api.route("/team", teamRoutes);
 api.route("/goals", goalsApi);
-api.route("/progress", progressRoutes);
 api.route("/delegation", delegationRoutes);
 api.route("/dashboard", dashboardRoutes);
 api.route("/usage", usageRoutes);
