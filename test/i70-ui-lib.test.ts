@@ -50,8 +50,12 @@ test("I9: the review says each changed environment field in plain words", () => 
 test("P16: a paused step carries a comment saying why, and resuming removes it", () => {
   const t = "jobs:\n  a:\n    steps:\n      - run: echo 1\n      - run: echo 2\n";
   const paused = ci.edits.stepPause(t, "a", 1);
-  assert.match(paused, /# Paused from Plania \(Camino\)/);
+  assert.match(paused, /# Paused from Plania \(Despliegue\)/);
   assert.equal(ci.edits.stepPause(paused, "a", 1), t);
+  // PLA-I2-3: a step paused before the rename (old mark) still resumes clean.
+  const old = paused.replace("(Despliegue)", "(Camino)");
+  assert.notEqual(old, paused);
+  assert.equal(ci.edits.stepPause(old, "a", 1), t);
 });
 
 test("I19: pinning a template's actions leaves none unpinned", () => {

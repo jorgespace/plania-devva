@@ -433,7 +433,7 @@ set it to one of your projects if you have no `plania` project). The doctor chec
 
 The brief is a tab of Compañía, after Plomería: `/ceo?v=brief` (the old `/brief` address redirects there, so saved
 links and notices still work; Brief is no longer in the app bar). Its count is what still waits on you in today's brief
-(open blockers and «te toca»). It is drawn in La corriente's look as a delta: one stream per project of the brief, in
+(open blockers and «te toca»). It is drawn in Corriente's look as a delta: one stream per project of the brief, in
 brief order, then "Entre apps". On a stream, new ideas spark near the source, what follows is a violet light with its
 key, what waits on you is an amber rhombus with its verb, and a blocker is an amber dam that cuts the stream (dotted
 after it). A stream is as wide as what it carries; it holds at most three ideas and five rows, the rest behind «+N».
@@ -679,11 +679,11 @@ before Plania runs, as a plain-text tool error (`INVALID_INPUT`). The catalog is
 | `BLOCKER_NOT_FOUND` | 400 | a blocked_by key does not exist in this project, or names the task itself |
 | `BODY_REMOVED` | 400 | body is gone in v2: use scope, checks, and note (the log) |
 | `BRANCH_NAME_INVALID` | 400 | the branch name does not match the project's branch_pattern (detail: pattern) |
-| `CAMINO_ACTIONLINT` | 400 | camino: actionlint found errors in a workflow Camino would propose; no PR was opened (detail: errors [{line, column, message, kind}]) |
-| `CAMINO_CHANGE_INVALID` | 400 | camino: a change in the set does not fit (detail: field, reason): an unknown config key, an integration branch equal to the published one, a folder that is not a clone of the repo, deleting a role branch, a protected or malformed start branch |
-| `CAMINO_KEY_INVALID` | 400 | camino: the pasted key has spaces, quotes or a label in it, or is shorter than 8 characters; nothing was saved |
-| `CAMINO_KEY_REJECTED` | 400 | camino: the service refused the key on its read-only test; nothing was saved (detail: status, message: the service's own words) |
-| `CAMINO_PROVIDER_UNKNOWN` | 400 | camino: no key can be saved for that service; it is Detected or Manual, or not a service Camino knows (detail: provider) |
+| `CAMINO_ACTIONLINT` | 400 | despliegue: actionlint found errors in a workflow Despliegue would propose; no PR was opened (detail: errors [{line, column, message, kind}]) |
+| `CAMINO_CHANGE_INVALID` | 400 | despliegue: a change in the set does not fit (detail: field, reason): an unknown config key, an integration branch equal to the published one, a folder that is not a clone of the repo, deleting a role branch, a protected or malformed start branch |
+| `CAMINO_KEY_INVALID` | 400 | despliegue: the pasted key has spaces, quotes or a label in it, or is shorter than 8 characters; nothing was saved |
+| `CAMINO_KEY_REJECTED` | 400 | despliegue: the service refused the key on its read-only test; nothing was saved (detail: status, message: the service's own words) |
+| `CAMINO_PROVIDER_UNKNOWN` | 400 | despliegue: no key can be saved for that service; it is Detected or Manual, or not a service Despliegue knows (detail: provider) |
 | `DELEGATION_EVIDENCE` | 400 | a delegated answer or a Won't do / reopen move needs delegated_by_owner.message_id (8 to 200 characters) and a quote of 8 to 280 characters; empty or short evidence is refused |
 | `DEPLOY_SOURCE_REQUIRED` | 400 | set_env deployed needs a source {provider, deployment_id, url}: the server stores where the time came from |
 | `FETCH_ADDRESS_REFUSED` | 400 | safe fetch: the host is or resolves to a loopback, private, link-local, metadata or reserved address; nothing was sent (detail: address, reason) |
@@ -768,7 +768,7 @@ before Plania runs, as a plain-text tool error (`INVALID_INPUT`). The catalog is
 | `THREAD_FORBIDDEN` | 403 | thread_post or thread_read on a thread that is not yours: Asistente may use every thread, a team member only its own project's (detail: thread, agent) |
 | `WAIVE_VISUAL_FORBIDDEN` | 403 | waive_check: a visual check (how the screen looks, a still, a viewport) is waived only by the QA lane or the owner (detail: n, text); prove it with a visual result or ask the owner |
 | `AGENT_NOT_FOUND` | 404 | unknown roster slug (owner_agent or reports_to) |
-| `CAMINO_KEY_MISSING` | 404 | camino: no key is saved for that service on this project |
+| `CAMINO_KEY_MISSING` | 404 | despliegue: no key is saved for that service on this project |
 | `CHECK_NOT_FOUND` | 404 | no check with that n on this task |
 | `CONSULTA_NOT_FOUND` | 404 | answer_consulta on an id that is not a question of this project |
 | `DECISION_NOT_FOUND` | 404 | supersedes names no decision of this project |
@@ -794,11 +794,11 @@ before Plania runs, as a plain-text tool error (`INVALID_INPUT`). The catalog is
 | `BATCH_FAILED` | 409 | an atomic batch rolled back because one op failed (detail: index, op, failed: {error, status, ...}) |
 | `BLOCKER_NOT_WITHDRAWABLE` | 409 | set_task withdraw_blocker: not a pending blocker parsed from a note on this task, or another session's note (detail: reason) |
 | `BRANCH_IN_USE` | 409 | the branch belongs to another live initiative (detail: owner_key); pass share_branch: true with a reason to share it |
-| `CAMINO_GITHUB_REFUSED` | 409 | camino: GitHub refused a change; the ones before it stay applied and the rest did not run (detail: step, status, message) |
-| `CAMINO_KEY_STORE` | 409 | camino: the keychain (or the 0600 file) did not take the key; nothing else changed |
+| `CAMINO_GITHUB_REFUSED` | 409 | despliegue: GitHub refused a change; the ones before it stay applied and the rest did not run (detail: step, status, message) |
+| `CAMINO_KEY_STORE` | 409 | despliegue: the keychain (or the 0600 file) did not take the key; nothing else changed |
 | `CAMINO_NEEDS_APPROVAL` | 409 | Publicar: a migration the release carries destroys or reshapes data and the owner has not approved that exact file (detail: files [{path, sha256, statements}]) |
-| `CAMINO_NO_GITHUB` | 409 | camino: the change needs GitHub and the project has no repository or no token (detail: repo, token) |
-| `CAMINO_RULE_BLOCKS` | 409 | Aceptar or Publicar: the branch's rule in Camino requires checks that are not green on this PR, on a repo where GitHub cannot enforce it (detail: base, checks) |
+| `CAMINO_NO_GITHUB` | 409 | despliegue: the change needs GitHub and the project has no repository or no token (detail: repo, token) |
+| `CAMINO_RULE_BLOCKS` | 409 | Aceptar or Publicar: the branch's rule in Despliegue requires checks that are not green on this PR, on a repo where GitHub cannot enforce it (detail: base, checks) |
 | `CAMINO_SQL_REVIEW` | 409 | Publicar: squawk found errors in a migration the release carries, and the production environment asks for the SQL review (detail: files [{path, issues}]) |
 | `CHECKS_OPEN` | 409 | In review, Merged, Released or Done while a check is neither done nor waived (detail: open, the check numbers) |
 | `CLAIM_HELD` | 409 | another session holds a live lease (detail: owner, lease_until, workspace) |
@@ -832,7 +832,7 @@ before Plania runs, as a plain-text tool error (`INVALID_INPUT`). The catalog is
 | `QUOTA_EXCEEDED` | 409 | consume would pass the daily quota (detail: limit, used, remaining) |
 | `REFERENCE_LIMIT` | 409 | the seat already has the most references it may keep (detail: max) |
 | `RELEASE_MERGE_FAILED` | 409 | release/ship: a gh call failed (detail: step token | list | edit | create | merge | view, output); nothing was recorded |
-| `RELEASE_NOT_READY` | 409 | release/ship: the step cannot ship now (detail: reason mode_command | no_repo | no_release | no_github_data | nothing_to_ship | before_steps | open_checks | merged | freeze: Camino's production environment is in its freeze window | prod_migration_unhandled: the release adds migrations and neither settings.release.prod_migrations nor Camino's production environment names who migrates) |
+| `RELEASE_NOT_READY` | 409 | release/ship: the step cannot ship now (detail: reason mode_command | no_repo | no_release | no_github_data | nothing_to_ship | before_steps | open_checks | merged | freeze: Despliegue's production environment is in its freeze window | prod_migration_unhandled: the release adds migrations and neither settings.release.prod_migrations nor Despliegue's production environment names who migrates) |
 | `REQUEST_ID_REUSED` | 409 | request_id was already used by a different tool in this project |
 | `RESOURCE_HELD` | 409 | another session holds the resource (detail: holder, lease_until, purpose) |
 | `SEARCH_UNAVAILABLE` | 409 | search needs a devva engine and an embedder, and this server has neither configured (PLANIA_SEARCH, SEXTANT_URL); list_tasks search matches words |
@@ -975,12 +975,20 @@ system themes. Times arrive as UTC and show in the browser's local time.
   what; a doc opens across the page to read and edit. Archivo, the door that listed docs, is gone. Writes go through
   `set_project` and `attach_doc` with the version on screen (`GET` / `PUT /api/company/projects/:slug/settings…`), so a
   concurrent change is refused, not overwritten. PLA-I2-6: it also edits how the app starts (`settings.capture`:
-  command, port, pages) and, in a closed «Avanzado» section, every advanced setting below. A project with code made
+  command, port, pages) and, in a closed «Avanzado» section, the advanced settings below except those Despliegue
+  edits (PLA-133). A project with code made
   on the screen starts with a release step that ships from the screen (mode `merge`); `pnpm project:add` and
   `create_company_project` add none. No field takes a secret: a token is named by
   its variable (`github.token_env`, `vercel.token_env`), and a value shaped like a token is refused (`SECRET_VALUE`).
   Each missing item on the readiness list links to its section. Plomería's «Cada corrida» sets the company's
   `max_turns`, `timeout_minutes` and `cooldown_minutes`.
+- **Despliegue** (PLA-I68, once called Camino; the code and its address still say `camino`): how a project's code
+  reaches people, a door before Ajustes (`/ceo?proyecto=<slug>&t=camino`). Configuration only: shipping, migrating and
+  merging stay in Publicar. Its sections are Resumen, Conexiones y llaves, Propuestas (the project's open PRs),
+  Repositorio y ramas, Commits, Pruebas (CI), Entornos and Historial. It checks the repo against GitHub, the services and
+  this machine, and proposes changes (rulesets, workflows, commit checks) as PRs. PLA-133: it is where `start_branch`,
+  `release_target`, `release_on`, the GitHub key's variable and `vercel` are edited; they left Ajustes › Avanzado.
+- **Marca** (PLA-I66): the project's logo and its icon files, a door before Despliegue.
 
 #### Project settings
 

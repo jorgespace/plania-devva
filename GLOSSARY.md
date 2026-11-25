@@ -97,8 +97,9 @@ Which screen names keep their Spanish form in English is in [docs/screen-words.m
 | Word | Meaning |
 |---|---|
 | Inicio | The home screen: every project at a glance, what waits on the owner, what the Mac is running. |
-| La corriente | The company screen: every project's work as a stream, by stage. |
-| Compañía | The company view, where the threads and the teams are. |
+| Compañía | The company screen: Corriente, Te toca, Asistente, Brief and Pedir in its header, and each project's tabs. |
+| Corriente | Compañía's first view: every project's work as a stream, by stage. Older text calls it La corriente. |
+| Te toca | What waits on the owner: questions, proposals and steps only he can take. |
 | Piso (floor) | One project's level in the company view. |
 | Lane | One row of the board per open initiative, always with the same five columns. |
 | Sueltos | The lane for tickets that belong to no initiative. |
@@ -110,10 +111,16 @@ Which screen names keep their Spanish form in English is in [docs/screen-words.m
 | Headline | One line on where a project stands. |
 | Readiness | Whether a project can be picked up right now: ready, caution, blocked, or nothing to resume. |
 | Digest | What changed since a given moment, per project. |
-| Buzón | The first stop of La corriente: where a pedido lands before anyone shapes it. |
+| Buzón | The first stop of Corriente: where a pedido lands before anyone shapes it. |
 | Plomería | The machine's plumbing on one page: whether the company runs, the plan's brake, what the models spent, the switches per project, the last runs, the language. |
 | Docs del proyecto | A project's own docs, in Ajustes: the three context notes every run reads, and the library the team looks up. Archivo, which listed every doc, is gone (PLA-135). |
-| Tablero | The board of one project's work, by stage; also the building's switchboard of apps on Máquinas. |
+| Todo | A project's first tab: one list of its work, by stage. It replaced the Tablero, Ahora, Pedidos, Ideas and Diseño tabs. |
+| Hecho | A project's tab of what was finished. |
+| Equipo | A project's tab of its seats and teams; Motores sits behind it. |
+| Marca | A project's tab for its logo and icon files. |
+| Despliegue | A project's tab for how its code reaches people: repo and branches, commits, tests, environments, keys, and the release and branch settings that left Ajustes › Avanzado (PLA-133). It was called Camino; the code still says camino. |
+| Ajustes | A project's settings tab: where the code is, how the app starts, QA's list, Docs del proyecto, and a closed «Avanzado» section. |
+| Tablero | The switchboard of apps on Máquinas. A project's list used to be its Tablero; it is Todo now. |
 | Ficha | The card of one thing (pedido, idea, initiative, ticket) with everything about it, opened from any list. |
 | Máquinas | A project's services on the Mac: how its app starts, what is running, the test copies. |
 | Novedades | The page with the notes of the last Plania update. |

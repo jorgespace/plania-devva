@@ -30,7 +30,7 @@ work comes in with `git fetch upstream; git merge upstream/main`, on a branch, t
   `127.0.0.1:2505`, `~/.config/plania/devva-token`). Each test file writes to lobes of its own, `t_<hash of the
   checkout and the file>`, emptied before it runs and when it ends (`resetTestStore()` in `test/helpers.ts`). Two
   runs of the same file in the same checkout at once collide.
-- Tests of a product's own Postgres (test copies, the Máquina inventory, Camino's migration count) use the local
+- Tests of a product's own Postgres (test copies, the Máquina inventory, Despliegue's migration count) use the local
   Postgres and skip when none answers; `PLANIA_TEST_PGUSER` names the role (on Windows it defaults to `postgres`).
 - A few tests depend on macOS or Unix tools (file modes, `lsof`, `ps`, the gitleaks binary) and fail on
   Windows. Check a failure against `main` before treating it as yours. A new test like that skips with its

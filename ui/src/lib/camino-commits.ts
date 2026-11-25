@@ -281,7 +281,7 @@ export function prTitleWorkflow(c: ConventionId, st: CommitSettings, language: L
   return [
     "name: PR title",
     "",
-    "# Proposed by Plania (Camino › Commits y propuestas): the PR title is the commit a squash merge keeps.",
+    "# Proposed by Plania (Despliegue › Commits y propuestas): the PR title is the commit a squash merge keeps.",
     "on:",
     "  pull_request:",
     "    types: [opened, edited, synchronize, reopened]",

@@ -389,7 +389,7 @@ export function createMcpServer(db: Db, opts: ServerOptions = {}): McpServer {
         "Project title, long body (stack, repo, prod, constraints), rules (project-specific additions to the protocol in the server instructions) with rules_version, protocol_version, headline (the note set_project writes; get_resume has the generated line), settings (release_target, branch_pattern, claim_from, resources, quotas, github, vercel, release),",
         "ticket counts, env (per environment: commit, branch, migrations, flags, deployed_at and its source), branches (each with its owner, head and merge state), resources (live leases, today's quotas), metrics, reserved sequence numbers with the ticket holding each,",
         "and release: the step settings.release names (from → into), with how far from is ahead, the merged tickets it ships, their migrations, the before-steps, open checks, the command the owner runs, its mode (command, or merge: the owner ships it from the screen) and merged once they did (null without settings.release). Agents never merge it.",
-        "branch_roles: how the project publishes (trunk, integ, tags), its published and integration branches and the work-branch pattern, as the owner set them in Camino; read them instead of assuming branch names.",
+        "branch_roles: how the project publishes (trunk, integ, tags), its published and integration branches and the work-branch pattern, as the owner set them in Despliegue; read them instead of assuming branch names.",
         "runner: the project's run limits set in Motores (max_concurrent, consulta_slots, max_per_agent, serialize_areas) and what is live now (work, consulta). Read-only: no tool changes them.",
       ].join(" "),
       inputSchema: { project },

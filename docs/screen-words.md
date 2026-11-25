@@ -69,7 +69,7 @@ English column is what is written in English sentences around it.
 | Spanish | In English | Why |
 |---|---|---|
 | Plania | stays | The product. |
-| La corriente | stays | A place name; «the stream» is the gloss in help text. |
+| Corriente | stays | A place name: Compañía's first view; «the stream» is the gloss in help text. Older text calls it La corriente. |
 | Compañía | Company | A plain word, not a brand. |
 | Plomería | stays | A place name; «the plumbing» in help text. |
 | Máquina / Máquinas | Machine / Machines | Plain words. |
@@ -80,9 +80,14 @@ English column is what is written in English sentences around it.
 | Asistente | stays | A role name in prompts and the roster. |
 | El Probador | stays | A tool's name. |
 | Motores | Engines | A plain word. |
+| Todo | All | A project's list, its first tab. |
+| Equipo | Team | A plain word. |
+| Marca | Brand | A plain word. |
+| Despliegue | Deploy | A project's tab: how its code reaches people. It was Camino. |
+| Ajustes | Settings | A plain word. |
 | Docs del proyecto | Project docs | A plain phrase. |
 | Biblioteca | Library | A plain word. |
-| Tablero | Board | A plain word. |
+| Tablero | Board | A plain word: the switchboard of apps on Máquinas. A project's list is Todo now. |
 | Ficha | Card | A plain word. |
 | Novedades | What's new | A plain word. |
 | Calidad | Quality | A plain word. |

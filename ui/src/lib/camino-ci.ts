@@ -35,7 +35,9 @@ export const SHA_PIN = /@[0-9a-f]{40}$/;
 // A paused step's condition: an event that never happens. actionlint refuses a constant «false»; this it accepts, and
 // it reads as what it is.
 const PAUSED = "camino-paused";
-const PAUSE_NOTE_MARK = "Paused from Plania (Camino)";
+const PAUSE_NOTE_MARK = "Paused from Plania (Despliegue)";
+// PLA-I2-3: files paused before the rename carry the old mark; unpausing still clears it.
+const PAUSE_NOTE_MARKS = [PAUSE_NOTE_MARK, "Paused from Plania (Camino)"];
 export const PAUSE_IF = "${{ github.event_name == '" + PAUSED + "' }}";
 
 /** The check name GitHub reports for one value of a job's matrix: the value replaces an expression in the name, or is added in parentheses. */
@@ -206,7 +208,7 @@ export const edits = {
       const cur = m.get("if");
       if (cur !== undefined && (String(cur).includes(PAUSED) || cur === false || cur === "${{ false }}")) {
         m.delete("if");
-        if (String(m.commentBefore ?? "").includes(PAUSE_NOTE_MARK)) m.commentBefore = null;
+        if (PAUSE_NOTE_MARKS.some((k) => String(m.commentBefore ?? "").includes(k))) m.commentBefore = null;
       } else if (cur === undefined) {
         place(d, m, "if", PAUSE_IF, { before: ["uses", "run", "with", "env"] });
         // PLA-I70-42: the file says why this step never runs.
@@ -234,7 +236,7 @@ export function newWorkflow(scripts: string[], pm: "npm" | "pnpm" | "yarn", bran
   const lines = [
     "name: CI",
     "",
-    "# Proposed by Plania (Camino › Tests) with the project's own scripts.",
+    "# Proposed by Plania (Despliegue › Tests) with the project's own scripts.",
     "on:",
     "  pull_request:",
     `    branches: [${branches.join(", ")}]`,
@@ -339,7 +341,7 @@ export const minutesOf = (runs: RunRow[]): number => Math.round(runs.reduce((a, 
 // ---- the dependency bot
 export type DepsForm = { on: boolean; interval: "daily" | "weekly" | "monthly"; target: string | null; group: boolean; auto_patch: boolean };
 export function dependabotYml(f: DepsForm, ecosystems: string[]): string {
-  const lines = ["# Proposed by Plania (Camino › Tests › Updates).", "version: 2", "updates:"];
+  const lines = ["# Proposed by Plania (Despliegue › Tests › Updates).", "version: 2", "updates:"];
   for (const eco of ecosystems) {
     lines.push("  - package-ecosystem: " + eco, '    directory: "/"', "    schedule:", "      interval: " + f.interval);
     if (f.target) lines.push("    target-branch: " + f.target);
@@ -352,7 +354,7 @@ export function dependabotYml(f: DepsForm, ecosystems: string[]): string {
 export const AUTO_PATCH_YML = [
   "name: Dependabot patch auto-merge",
   "",
-  "# Proposed by Plania (Camino › Tests › Updates): only patch updates, and only through the repo's required checks.",
+  "# Proposed by Plania (Despliegue › Tests › Updates): only patch updates, and only through the repo's required checks.",
   "on: pull_request",
   "",
   "permissions:",
