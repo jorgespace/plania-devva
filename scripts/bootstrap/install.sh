@@ -1,6 +1,6 @@
 #!/bin/sh
 # PLA-I2-4 (audit B2): install Plania on macOS or Linux from one line, without corepack, on a brand-new machine.
-#   curl -fsSL https://github.com/Jorg3L3on/plania/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/jorgespace/plania-devva/releases/latest/download/install.sh | sh
 #   curl -fsSL <same address> | sh -s -- --dir ~/otra-carpeta
 #   sh install.sh --from plania-0.1.0.tar.gz          a package already on this machine, nothing downloaded
 #   sh install.sh [options] -- --prefix plania_casa   everything after -- goes to pnpm plania:install
@@ -13,11 +13,11 @@
 # then `pnpm plania:install`, which starts Plania as a service.
 # Downloads come from PLANIA_DOWNLOAD_BASE (default: the latest GitHub Release). pnpm release:pack stamps the
 # release's version into DEFAULT_VERSION; with no version the installer takes plania-latest.tar.gz, which every
-# release carries. Another version: PLANIA_DOWNLOAD_BASE=https://github.com/Jorg3L3on/plania/releases/download/v<x.y.z>.
+# release carries. Another version: PLANIA_DOWNLOAD_BASE=https://github.com/jorgespace/plania-devva/releases/download/v<x.y.z>.
 set -eu
 
 DEFAULT_VERSION=""
-DEFAULT_BASE="https://github.com/Jorg3L3on/plania/releases/latest/download"
+DEFAULT_BASE="https://github.com/jorgespace/plania-devva/releases/latest/download"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'Plania: %s\n' "$*" >&2; exit 1; }

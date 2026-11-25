@@ -41,7 +41,7 @@ describe("the installers parse", () => {
     for (const f of [SH, PS1]) {
       const text = readFileSync(f, "utf8");
       assert.doesNotMatch(text.replace(/^#.*$/gm, ""), /corepack (enable|prepare)/);
-      assert.match(text, /^(DEFAULT_BASE="|\$DefaultBase = ')https:\/\/github\.com\/Jorg3L3on\/plania\/releases\/latest\/download["']$/m);
+      assert.match(text, /^(DEFAULT_BASE="|\$DefaultBase = ')https:\/\/github\.com\/jorgespace\/plania-devva\/releases\/latest\/download["']$/m);
       assert.match(text, /plania-latest\.tar\.gz/, "with no version, the asset every release carries");
       assert.match(text, /PLANIA_DOWNLOAD_BASE/);
     }

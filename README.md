@@ -30,17 +30,17 @@ Windows, Homebrew on macOS, apt or dnf on Linux). Expect your computer's passwor
 On macOS or Linux, in a terminal:
 
 ```bash
-curl -fsSL https://github.com/Jorg3L3on/plania/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/jorgespace/plania-devva/releases/latest/download/install.sh | sh
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-irm https://github.com/Jorg3L3on/plania/releases/latest/download/install.ps1 | iex
+irm https://github.com/jorgespace/plania-devva/releases/latest/download/install.ps1 | iex
 ```
 
 It installs into the `plania` folder in your home folder, and asks first in case you want another. Releases live on
-this repository's [GitHub Releases](https://github.com/Jorg3L3on/plania/releases); the installer checks the package
+this repository's [GitHub Releases](https://github.com/jorgespace/plania-devva/releases); the installer checks the package
 against its `.sha256` before it unpacks anything.
 
 From a package file you already have, with the installer that came beside it:

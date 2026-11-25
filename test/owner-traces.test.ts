@@ -45,7 +45,7 @@ const ALLOW: { path: string; why: string }[] = [
 const TEXT = /\.(ts|tsx|js|mjs|md|css|html|json|sql|py|sh|toml|txt|ya?ml)$/;
 // The product's own home: releases are published from this GitHub repository, so its address may appear (the
 // installers' default download address, the README's one-liners). Only the full repository address is let through.
-const RELEASE_HOME = /github\.com\/jorg3l3on\/plania\b/gi;
+const RELEASE_HOME = /github\.com\/jorgespace\/plania-devva\b/gi;
 
 function walk(rel: string): string[] {
   const abs = path.join(ROOT, rel);

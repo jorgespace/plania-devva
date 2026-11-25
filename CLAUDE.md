@@ -10,7 +10,9 @@ This file is a map. The detail is in [README.md](README.md), [GLOSSARY.md](GLOSS
 ## Run, test, type-check
 
 Node 22 or newer, pnpm through corepack, and a devva engine running in Docker (`deploy/devva/README.md`). This is the
-`plania-devva` branch: there is no Postgres for Plania's own data, no SQL and no migrations.
+devva fork, `jorgespace/plania-devva` (remote `origin`), whose default branch is `plania-devva`: there is no Postgres
+for Plania's own data, no SQL and no migrations. The Postgres Plania is `Jorg3L3on/plania` (remote `upstream`); its
+work comes in with `git fetch upstream; git merge upstream/main`, on a branch, through a pull request.
 
 | To | macOS / Linux | Windows (PowerShell) |
 |---|---|---|
@@ -31,7 +33,7 @@ Node 22 or newer, pnpm through corepack, and a devva engine running in Docker (`
 - Tests of a product's own Postgres (test copies, the Máquina inventory, Camino's migration count) use the local
   Postgres and skip when none answers; `PLANIA_TEST_PGUSER` names the role (on Windows it defaults to `postgres`).
 - A few tests depend on macOS or Unix tools (file modes, `lsof`, `ps`, the gitleaks binary) and fail on
-  Windows. Check a failure against `main` before treating it as yours. A new test like that skips with its
+  Windows. Check a failure against `plania-devva` before treating it as yours. A new test like that skips with its
   reason: `{ skip: needs({ posix: true }) }` from `test/platform.ts`.
 - `.gitattributes` keeps every text file LF. A checkout made before it may still hold CRLF files: run
   `git add --renormalize .` and check out again (`git rm -r --cached -q . && git reset -q --hard` on a clean tree).
@@ -69,7 +71,8 @@ Node 22 or newer, pnpm through corepack, and a devva engine running in Docker (`
    `src/db/schema.ts` (a default the store must fill, in `src/store/defaults.ts`); rows every store needs, into
    `src/store/seed.ts`. A change to data already stored is a step in `scripts/devva-*.ts` (see
    `src/store/owner-neutral.ts`), safe to run twice, run by the owner, never by an agent on a real store.
-3. **Never push to `main`, never merge.** Work on a branch and open a pull request.
+3. **Never push to `plania-devva` or `main`, never merge.** Work on a branch and open a pull request against
+   `plania-devva` in this fork. Nothing goes to `upstream`.
 4. **Nothing for Plania goes into a product repo**: no `CLAUDE.md`, no agent files, no hooks, no CI.
    What agents need reaches a run from Plania.
 5. **No secrets in git.** `.env` stays local; `adapter_config` holds variable names, never values.
