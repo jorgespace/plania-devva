@@ -1,19 +1,16 @@
-// Inicio: la ciudad of open initiatives, with the headline in its sky and whatever waits on the owner
-// decided from a tower's ficha; under it, what the machine runs and the projects as a rail. The data
+// Inicio: la ciudad of open initiatives at the top, the color legend behind an «i» in its sky and whatever waits
+// on the owner decided from a tower's ficha; under it, what changed, what the machine runs and the projects as a rail. The data
 // comes from the same three queries the other screens use.
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { GoalsHome } from "@/components/goals/goals-board";
 import { Ciudad } from "@/components/home/ciudad";
 import { Hoy } from "@/components/home/hoy";
-import { PedirHome } from "@/components/pedir";
-import { GuiaPrimeraEntrega } from "@/components/home/guia-primera-entrega";
 import { LaMac, Proximo, Proyectos } from "@/components/home/parts";
 import { proximoOf } from "@/lib/due";
 import { api } from "@/lib/api";
 import { cityOf, looseInbox, waitingOf, workingCity } from "@/lib/city";
-import { envLine, flightsOf, headlineOf, liveServersOf, tileOf } from "@/lib/home";
+import { envLine, liveServersOf, tileOf } from "@/lib/home";
 import { HOME_PAGE } from "@/lib/home-words";
 import { words } from "@/lib/i18n";
 import { listedProjects } from "@/lib/proyectos-visibles";
@@ -41,7 +38,6 @@ export function HomePage() {
     // F7: the home project stays off Inicio while it holds no work.
     const list = listedProjects(projects.data ?? []);
     const items = machine.data?.items ?? [];
-    const flights = flightsOf(list, items);
     const all = cityOf(list, decisions);
     // The headline and the tiles count every open initiative waiting on the owner, shown or not.
     const waiting = waitingOf(all, decisions);
@@ -51,7 +47,6 @@ export function HomePage() {
       districts,
       loose: looseInbox(districts, decisions),
       envLines: Object.fromEntries(list.map((p) => [p.slug, envLine(p.envs, nowMs)])),
-      headline: headlineOf({ projects: list, flights, inbox: waiting, totals: machine.data?.totals ?? null, nowMs }),
       servers: liveServersOf(items, nowMs),
       proximo: proximoOf(list),
       tiles: list.map((p) => tileOf(p, waiting.by_project[p.slug] ?? 0, nowMs)).sort((a, b) => a.rank - b.rank || a.slug.localeCompare(b.slug)),
@@ -75,18 +70,11 @@ export function HomePage() {
 
   return (
     <div className="grid grid-cols-1 gap-6 sm:gap-7">
-      {/* PLA-I2-16: the guide to a first delivery, until one is accepted. */}
-      <GuiaPrimeraEntrega />
+      {/* The city always opens Inicio; asking for something lives in La corriente. */}
+      <Ciudad districts={model.districts} loose={model.loose} envLines={model.envLines} />
 
-      {/* 2.12: one field to ask for something in any project. */}
-      <PedirHome projects={listedProjects(projects.data)} />
-
-      {/* 2.12: what changed since "Visto", and what waits on the owner, above the city. */}
+      {/* 2.12: what changed since "Visto", and what waits on the owner, under the city. */}
       <Hoy names={names} />
-
-      <Ciudad districts={model.districts} loose={model.loose} headline={model.headline} envLines={model.envLines} nowMs={nowMs} />
-
-      <GoalsHome />
 
       <Proximo lines={model.proximo} names={names} nowMs={nowMs} />
 
