@@ -1,4 +1,4 @@
-// Mi progreso (PLA-I19). Read-only totals for the screen: what reached a final Done or Merged,
+// Progress totals (PLA-I19; its Progreso page was removed in PLA-I1, the dashboard and Compañía still read them): what reached a final Done or Merged,
 // bucketed by calendar day in the screen zone (src/locale.ts). A reopen clears resolved_at, so a
 // ticket that was Done, reopened and Done again counts once, on the day it is Done now.
 // Titles containing [PRUEBA] and Won't do never count. Ideas stay in the bitácora only.
@@ -43,31 +43,9 @@ export const PROGRESS_WORDS = defineWords({
       initiative: "Iniciativa cerrada",
       pr: "PR fusionado",
     } as Record<string, string>,
-    status: {
-      Done: "Cerrada",
-      "Won't do": "Descartada",
-      "In progress": "En curso",
-      "In review": "En revisión",
-      Merged: "Fusionada",
-      Released: "Publicada",
-      Ready: "Lista",
-      Backlog: "En espera",
-      Blocked: "Bloqueada",
-      "Needs owner": "Te toca",
-      Planning: "Planeando",
-      Active: "Activa",
-      Shipping: "En estreno",
-      "On hold": "En pausa",
-      Open: "Abierta",
-    } as Record<string, string>,
     today: "Hoy",
     week: (n: number, from: string, to: string) => `SEMANA ${n} · ${from} – ${to}`,
     year: (y: string) => `AÑO ${y}`,
-    created: "Creada",
-    note: "Nota",
-    movedTo: (s: string) => `Pasó a ${s}`,
-    closed: "Cerrada",
-    leftDone: "Quedó en Done",
   },
   en: {
     weekShort: ["M", "T", "W", "T", "F", "S", "S"] as readonly string[],
@@ -84,31 +62,9 @@ export const PROGRESS_WORDS = defineWords({
       initiative: "Initiative closed",
       pr: "PR merged",
     } as Record<string, string>,
-    status: {
-      Done: "Closed",
-      "Won't do": "Dropped",
-      "In progress": "In progress",
-      "In review": "In review",
-      Merged: "Merged",
-      Released: "Released",
-      Ready: "Ready",
-      Backlog: "Waiting",
-      Blocked: "Blocked",
-      "Needs owner": "Your turn",
-      Planning: "Planning",
-      Active: "Active",
-      Shipping: "Shipping",
-      "On hold": "On hold",
-      Open: "Open",
-    } as Record<string, string>,
     today: "Today",
     week: (n: number, from: string, to: string) => `WEEK ${n} · ${from} – ${to}`,
     year: (y: string) => `YEAR ${y}`,
-    created: "Created",
-    note: "Note",
-    movedTo: (s: string) => `Moved to ${s}`,
-    closed: "Closed",
-    leftDone: "Ended in Done",
   },
 });
 const pw = () => say(PROGRESS_WORDS);
@@ -223,32 +179,6 @@ export type ProgressLog = {
   projects: ProjectCount[];
   days: { date: string; weekday: string; total: number; best: boolean; by_project: ProjectCount[]; entries: LogEntry[] }[];
   next_cursor: string | null;
-};
-
-export type ProgressItem = {
-  project: string;
-  project_title: string;
-  key: string;
-  kind: "ticket" | "initiative" | "idea";
-  type: string;
-  type_label: string;
-  title: string;
-  summary: string;
-  change: string;
-  doc: string | null;
-  status: string;
-  day: string | null;
-  time: string | null;
-  at: string | null;
-  created_day: string | null;
-  parent: { key: string; title: string } | null;
-  prs: ProgressPr[];
-  images: ProgressImage;
-  children: LogChild[];
-  child_done: number;
-  child_total: number;
-  span_days: number | null;
-  timeline: { day: string; time: string; label: string; text: string }[];
 };
 
 type TaskAgg = { day: string; hour: number; slug: string; project_title: string; kind: string; work_type: string; n: number };
@@ -1320,89 +1250,4 @@ export async function progressLog(db: Db, input: { from?: string; to?: string; p
       next_cursor: next,
     };
   });
-}
-
-export async function progressItem(db: Db, project: string, key: string): Promise<ProgressItem> {
-  const tz = progressTz();
-  const r = readerOf(db);
-  // By its canonical key in the project (not an alias). A missing value names nothing: the port reads an
-  // undefined filter as "any".
-  const place = project == null ? undefined : await r.get("projects", { slug: project });
-  if (!place) throw new ToolError("PROJECT_NOT_FOUND");
-  const task = key == null ? undefined : await r.get("tasks", { projectId: place.id, key });
-  if (!task || isPruebaTitle(task.title) || task.status === WONT) throw new ToolError("TASK_NOT_FOUND");
-  const parent = task.parentId ? await r.get("tasks", { id: task.parentId }) : undefined;
-  const row = {
-    id: task.id,
-    key: task.key,
-    kind: task.kind as ProgressItem["kind"],
-    work_type: task.workType,
-    title: task.title,
-    summary: task.summary,
-    status: task.status,
-    resolved_at: task.resolvedAt,
-    created_at: task.createdAt,
-    slug: place.slug,
-    project_title: place.title,
-    parent_key: parent?.key ?? null,
-    parent_title: parent?.title ?? null,
-  };
-  const [changes, images, prs, children, events] = await Promise.all([
-    changesFor(r, [row.id]),
-    imagesFor(r, [row.id]),
-    prsFor(r, [row.id]),
-    row.kind === "initiative" ? childrenFor(r, [row.id]) : Promise.resolve(new Map<string, LogChild[]>()),
-    r.find("events", { taskId: row.id, type: ["task.created", "task.status", "note"] }, { orderBy: [{ column: "id" }], limit: 16 }),
-  ]);
-  const kids = children.get(row.id) ?? [];
-  const stats = childStats(kids);
-  const at = row.resolved_at ? new Date(row.resolved_at) : null;
-  const created = new Date(row.created_at);
-  const type = typeOf(row.kind, row.work_type);
-  const doc = changes.get(row.id)?.doc ?? null;
-  const timeline = events.map((e) => {
-    const when = new Date(e.createdAt);
-    const to = typeof e.payload.to === "string" ? e.payload.to : "";
-    const text = typeof e.payload.text === "string" ? e.payload.text : typeof e.payload.note === "string" ? e.payload.note : "";
-    const label = e.type === "task.created" ? pw().created : e.type === "note" ? pw().note : pw().status[to] ?? (to || e.type);
-    const body = e.type === "task.created" ? row.title : e.type === "note" ? text : to ? pw().movedTo(pw().status[to] ?? to) : "";
-    return { day: dayInTz(when, tz), time: timeInTz(when, tz), label, text: body };
-  });
-  if (timeline.length === 0) {
-    timeline.push({ day: dayInTz(created, tz), time: timeInTz(created, tz), label: "Creada", text: row.title });
-    if (at) timeline.push({ day: dayInTz(at, tz), time: timeInTz(at, tz), label: pw().closed, text: pw().leftDone });
-  }
-  const createdDay = dayInTz(created, tz);
-  const closedDay = at ? dayInTz(at, tz) : null;
-  return {
-    project: row.slug,
-    project_title: row.project_title,
-    key: row.key,
-    kind: row.kind,
-    type,
-    type_label: typeLabel(type),
-    title: row.title,
-    summary: row.summary,
-    change: row.summary.trim() || changes.get(row.id)?.change || "",
-    doc: doc ? doc.slice(0, 12_000) : null,
-    status: row.status,
-    day: closedDay,
-    time: at ? timeInTz(at, tz) : null,
-    at: at ? at.toISOString() : null,
-    created_day: createdDay,
-    parent: row.parent_key ? { key: row.parent_key, title: row.parent_title ?? row.parent_key } : null,
-    prs: prs.get(row.id) ?? [],
-    images: images.get(row.id) ?? pairImages([]),
-    children: kids,
-    ...stats,
-    span_days: closedDay ? Math.round((Date.parse(`${closedDay}T00:00:00Z`) - Date.parse(`${createdDay}T00:00:00Z`)) / 86_400_000) + 1 : null,
-    timeline,
-  };
-}
-
-function timeInTz(date: Date, tz: string): string {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(date);
-  const hour = parts.find((p) => p.type === "hour")?.value ?? "00";
-  const minute = parts.find((p) => p.type === "minute")?.value ?? "00";
-  return `${hour === "24" ? "00" : hour}:${minute}`;
 }

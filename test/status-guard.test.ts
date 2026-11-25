@@ -61,7 +61,7 @@ const ALLOW: Record<string, number> = {
   "src/mcp/goals.ts": 1,
   "src/mcp/initiative-state.ts": 16,
   "src/mcp/orden.ts": 2,
-  "src/mcp/progress.ts": 26,
+  "src/mcp/progress.ts": 5,
   "src/mcp/proposals.ts": 8,
   "src/mcp/questions.ts": 10,
   "src/mcp/readiness.ts": 5,

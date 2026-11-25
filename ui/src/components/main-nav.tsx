@@ -1,7 +1,7 @@
-// PLA-I30-2: the nav is Inicio (the logo) · Compañía · Bandeja · Progreso · Máquina (PLA-I63-5: Brief moved into Compañía). On the machine the four sit in
+// PLA-I30-2: the nav is Inicio (the logo) · Compañía · Bandeja · Máquina (PLA-I63-5: Brief moved into Compañía). On the machine the three sit in
 // the header; on a phone they move to a bottom tab bar, so the header never overflows at 390 px.
 // Presentational: the counts come in as props (test/compania-ui.test.ts renders it).
-import { BuildingIcon, CpuIcon, FlameIcon, InboxIcon } from "lucide-react";
+import { BuildingIcon, CpuIcon, InboxIcon } from "lucide-react";
 import { Link, NavLink } from "react-router";
 import { PlaniaMark } from "@/components/plania-mark";
 import { navItems } from "@/lib/compania";
@@ -9,7 +9,7 @@ import { words } from "@/lib/i18n";
 import { SHELL } from "@/lib/shell-words";
 import { cn } from "@/lib/utils";
 
-const ICON: Record<string, typeof InboxIcon> = { "/ceo": BuildingIcon, "/inbox": InboxIcon, "/progreso": FlameIcon, "/machine": CpuIcon };
+const ICON: Record<string, typeof InboxIcon> = { "/ceo": BuildingIcon, "/inbox": InboxIcon, "/machine": CpuIcon };
 
 export type NavCounts = { inbox: number; chores: number };
 
@@ -62,14 +62,14 @@ export const HeaderNav = ({ counts }: { counts: NavCounts }) => (
   </nav>
 );
 
-// The phone's bottom tab bar: five destinations, no "Más".
+// The phone's bottom tab bar: three destinations, no "Más".
 export const TabBar = ({ counts }: { counts: NavCounts }) => (
   <nav
     aria-label={words(SHELL).navMain}
     data-nav="tabs"
     className="fixed inset-x-0 bottom-0 z-20 border-t bg-background/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-md sm:hidden"
   >
-    <ul className="grid grid-cols-4">
+    <ul className="grid grid-cols-3">
       {navItems().map(({ to, label }) => {
         const Icon = ICON[to]!;
         return (

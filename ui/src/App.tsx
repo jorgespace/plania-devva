@@ -17,8 +17,6 @@ import { PrimerArranqueFaltaPage, PrimerArranquePage } from "@/pages/primer-arra
 import { LimitesPage } from "@/pages/limites";
 import { HomePage } from "@/pages/home";
 import { ProjectPage } from "@/pages/project";
-import { ProgressDayPage, ProgressItemPage, ProgressProjectPage, ProgressYearPage } from "@/pages/progreso-detail";
-import { ProgresoPage } from "@/pages/progreso";
 import { TokensPage } from "@/pages/tokens";
 import { CeoPage, CorrienteRedirect } from "@/pages/ceo";
 import { CalidadPage } from "@/pages/calidad";
@@ -89,11 +87,6 @@ export function App() {
         <Route path="/machine/falta" element={<FaltaPage />} />
         <Route path="/novedades" element={<NovedadesPage />} />
         <Route path="/machine/limites" element={<LimitesPage />} />
-        <Route path="/progreso" element={<ProgresoPage />} />
-        <Route path="/progreso/dia/:date" element={<ProgressDayPage />} />
-        <Route path="/progreso/anio/:year" element={<ProgressYearPage />} />
-        <Route path="/progreso/proyecto/:slug" element={<ProgressProjectPage />} />
-        <Route path="/progreso/:slug/:key" element={<ProgressItemPage />} />
         <Route path="/ceo" element={<CeoPage />} />
         {/* PLA-I62-9: La corriente was built at /corriente; it is Compañía now. */}
         <Route path="/corriente" element={<CorrienteRedirect />} />

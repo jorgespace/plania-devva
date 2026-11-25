@@ -161,16 +161,16 @@ test("limit editor: only the guard is left (PLA-21)", () => {
   assert.equal(/Límite semanal|aviso al 80|código del dueño/i.test(form), false);
 });
 
-test("nav: the logo is Inicio and the header has exactly four links (PLA-I63-5: Brief is a tab of Compañía); the phone tab bar has the same four on grid-cols-4", () => {
+test("nav: the logo is Inicio and the header has exactly three links (PLA-I63-5: Brief is a tab of Compañía; PLA-I1-1: Progreso is gone); the phone tab bar has the same three on grid-cols-3", () => {
   const counts = { inbox: 3, chores: 2 };
   const header = html(h(React.Fragment, null, h(nav.Logo!, {}), h(nav.HeaderNav!, { counts })));
-  assert.equal(count(header, /<a /g), 5);
+  assert.equal(count(header, /<a /g), 4);
   const links = [...header.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(links, ["/", "/ceo", "/inbox", "/progreso", "/machine"]);
-  for (const gone of ["/ahora", "/goals", "/equipo", "/tokens"]) assert.equal(header.includes(`href="${gone}"`), false, gone);
+  assert.deepEqual(links, ["/", "/ceo", "/inbox", "/machine"]);
+  for (const gone of ["/ahora", "/goals", "/equipo", "/tokens", "/progreso"]) assert.equal(header.includes(`href="${gone}"`), false, gone);
   const tabs = html(h(nav.TabBar!, { counts }));
-  assert.deepEqual([...tabs.matchAll(/href="([^"]+)"/g)].map((m) => m[1]), ["/ceo", "/inbox", "/progreso", "/machine"]);
+  assert.deepEqual([...tabs.matchAll(/href="([^"]+)"/g)].map((m) => m[1]), ["/ceo", "/inbox", "/machine"]);
   assert.ok(tabs.includes("sm:hidden"));
-  assert.ok(tabs.includes("grid-cols-4"));
+  assert.ok(tabs.includes("grid-cols-3"));
   assert.ok(!header.includes(">Brief<") && !tabs.includes(">Brief<"));
 });

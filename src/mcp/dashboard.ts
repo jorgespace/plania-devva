@@ -1,5 +1,5 @@
 // PLA-I24: the CEO screen. One read composed from the roster, goals, the inbox, and the week
-// already cached by Mi progreso. No budgets, no new tables, no second scan of the year.
+// already cached by the progress engine (src/mcp/progress.ts). No budgets, no new tables, no second scan of the year.
 // PLA-I27: the greeting name and this week's reported usage. Still no budgets.
 import type { Db } from "../db/client.js";
 import { readerOf } from "../store/port.js";
