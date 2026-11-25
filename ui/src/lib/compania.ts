@@ -33,8 +33,8 @@ export const COMPANIA_LIB_WORDS = defineWords({
     idle: "Nada corre.",
     planUnknown: "No se pudo leer el uso del plan. Desconocido = alto: no arranca nada nuevo.",
     run: { ok: "ok", fail: "falló", skipped: "omitida", stopped: "detenida", running: "corriendo", queued: "en espera" } as Record<string, string>,
-    // The header's four links, by path.
-    nav: { "/ceo": "Compañía", "/inbox": "Bandeja", "/progreso": "Progreso", "/machine": "Máquina" } as Record<string, string>,
+    // The header's three links, by path.
+    nav: { "/ceo": "Compañía", "/inbox": "Bandeja", "/machine": "Máquina" } as Record<string, string>,
   },
   en: {
     noMove: "no activity",
@@ -58,7 +58,7 @@ export const COMPANIA_LIB_WORDS = defineWords({
     idle: "Nothing is running.",
     planUnknown: "The plan's usage could not be read. Unknown = high: nothing new starts.",
     run: { ok: "ok", fail: "failed", skipped: "skipped", stopped: "stopped", running: "running", queued: "waiting" },
-    nav: { "/ceo": "Company", "/inbox": "Inbox", "/progreso": "Progress", "/machine": "Machine" },
+    nav: { "/ceo": "Company", "/inbox": "Inbox", "/machine": "Machine" },
   },
 });
 
@@ -325,14 +325,16 @@ export function ceoRedirect(search: string): string | null {
   return null;
 }
 // Old routes (PLA-I30-2). /goals scrolls to the team cards; /equipo goes to Máquina, where the plumbing lives (PLA-I33).
+// PLA-I1-1: Progreso was removed; its addresses, saved or shared, land on Inicio.
 export const LEGACY_REDIRECTS: Record<string, string> = {
   "/ahora": "/ceo",
   "/goals": "/ceo#proyectos",
   "/equipo": "/machine",
+  "/progreso/*": "/",
 };
 
-// The header: Inicio is the logo, then these four. NAV keeps the Spanish labels; the header reads navItems().
-const NAV_PATHS = ["/ceo", "/inbox", "/progreso", "/machine"] as const;
+// The header: Inicio is the logo, then these three. NAV keeps the Spanish labels; the header reads navItems().
+const NAV_PATHS = ["/ceo", "/inbox", "/machine"] as const;
 export const navItems = (language: Language = getLanguage()): { to: string; label: string }[] =>
   NAV_PATHS.map((to) => ({ to, label: words(COMPANIA_LIB_WORDS, language).nav[to]! }));
 export const NAV: { to: string; label: string }[] = navItems("es");

@@ -21,7 +21,6 @@ const { projectsRoot, worktreeRoot } = await import("../src/runner/worktree.js")
 const { progressSummary, clearProgressCache, dayInTz } = await import("../src/mcp/progress.js");
 const { projectName } = await import("../src/mcp/ceo-signals.js");
 const { instructions } = await import("../src/mcp/protocol.js");
-const { projectColor } = await import("../ui/src/lib/progress.js");
 const { pickLocale, FALLBACK_LOCALE } = await import("../ui/src/lib/locale.js");
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -124,10 +123,6 @@ test("check 4: two projects with made-up slugs get an order, a colour and a mark
   const day = await progressSummary(db, { range: "day" });
   const order = (day as unknown as { by_project: { slug: string }[] }).by_project.map((p) => p.slug).filter((s) => s !== "plania");
   assert.deepEqual(order, ["quokka", "arbol-azul"], "the row's order first, then the slug");
-  for (const slug of ["quokka", "arbol-azul"]) {
-    assert.match(projectColor(slug), /^#[0-9a-f]{6}$/);
-    assert.equal(projectColor(slug), projectColor(slug), "stable");
-  }
   assert.equal(projectName("arbol-azul"), "Arbol-azul");
   const mark = readFileSync(path.join(ROOT, "ui/src/components/plania-mark.tsx"), "utf8");
   assert.match(mark, /const brand = PROJECTS\[slug\] \?\? monogram\(slug, name\);/, "every project gets a mark: its monogram");

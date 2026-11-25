@@ -54,8 +54,8 @@ test("URL state: ?p and ?equipo are old links that redirect, ?vista previews, ?d
   assert.deepEqual(sheetOf("?doc=abc"), { kind: "doc", id: "abc" });
   assert.equal(sheetOf(""), null);
   // PLA-I33: the Equipo sheet left Compañía; its old route lands in Máquina, with the plumbing.
-  assert.deepEqual(LEGACY_REDIRECTS, { "/ahora": "/ceo", "/goals": "/ceo#proyectos", "/equipo": "/machine" });
-  assert.deepEqual(NAV.map((n) => n.label), ["Compañía", "Bandeja", "Progreso", "Máquina"]); // PLA-I63-5: Brief is a tab of Compañía
+  assert.deepEqual(LEGACY_REDIRECTS, { "/ahora": "/ceo", "/goals": "/ceo#proyectos", "/equipo": "/machine", "/progreso/*": "/" });
+  assert.deepEqual(NAV.map((n) => n.label), ["Compañía", "Bandeja", "Máquina"]); // PLA-I63-5: Brief is a tab of Compañía
 });
 
 // PLA-I30-4 check 2: no money in the Compañía page or the dashboard components. Template literals (`${`)

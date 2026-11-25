@@ -104,7 +104,7 @@ function PushSwitch() {
   );
 }
 
-// PLA-I30-2: everything that is not one of the four destinations lives in this menu, on every width:
+// PLA-I30-2: everything that is not one of the three destinations lives in this menu, on every width:
 // agent tokens (the old key icon), push, theme and logout.
 function MoreMenu({ onLogout }: { onLogout: () => void }) {
   const navigate = useNavigate();
