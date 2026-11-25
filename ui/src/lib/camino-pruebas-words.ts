@@ -75,7 +75,7 @@ export const PRUEBAS_WORDS = defineWords({
       delRuleset: (n: string) => `Borrar la regla «${n}»`,
     },
     prTitle: (path: string) => `ci: update ${path.replace(/^\.github\//, "")}`,
-    prBody: "Proposed from Plania (Camino › Pruebas). Review the diff: comments and untouched lines are kept, and actionlint found no errors.",
+    prBody: "Proposed from Plania (Despliegue › Pruebas). Review the diff: comments and untouched lines are kept, and actionlint found no errors.",
     exigir: {
       lead: "Elige de las pruebas que GitHub vio en los últimos 7 días. Un nombre que nunca corrió en una rama no se puede exigir ahí.",
       check: "Prueba",
@@ -202,7 +202,7 @@ export const PRUEBAS_WORDS = defineWords({
       delRuleset: (n: string) => `Delete the rule «${n}»`,
     },
     prTitle: (path: string) => `ci: update ${path.replace(/^\.github\//, "")}`,
-    prBody: "Proposed from Plania (Camino › Tests). Review the diff: comments and untouched lines are kept, and actionlint found no errors.",
+    prBody: "Proposed from Plania (Despliegue › Tests). Review the diff: comments and untouched lines are kept, and actionlint found no errors.",
     exigir: {
       lead: "Pick from the checks GitHub saw in the last 7 days. A name that never ran on a branch cannot be required there.",
       check: "Check",
