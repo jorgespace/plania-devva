@@ -433,7 +433,7 @@ set it to one of your projects if you have no `plania` project). The doctor chec
 
 The brief is a tab of Compañía, after Plomería: `/ceo?v=brief` (the old `/brief` address redirects there, so saved
 links and notices still work; Brief is no longer in the app bar). Its count is what still waits on you in today's brief
-(open blockers and «te toca»). It is drawn in La corriente's look as a delta: one stream per project of the brief, in
+(open blockers and «te toca»). It is drawn in Corriente's look as a delta: one stream per project of the brief, in
 brief order, then "Entre apps". On a stream, new ideas spark near the source, what follows is a violet light with its
 key, what waits on you is an amber rhombus with its verb, and a blocker is an amber dam that cuts the stream (dotted
 after it). A stream is as wide as what it carries; it holds at most three ideas and five rows, the rest behind «+N».
@@ -975,12 +975,20 @@ system themes. Times arrive as UTC and show in the browser's local time.
   what; a doc opens across the page to read and edit. Archivo, the door that listed docs, is gone. Writes go through
   `set_project` and `attach_doc` with the version on screen (`GET` / `PUT /api/company/projects/:slug/settings…`), so a
   concurrent change is refused, not overwritten. PLA-I2-6: it also edits how the app starts (`settings.capture`:
-  command, port, pages) and, in a closed «Avanzado» section, every advanced setting below. A project with code made
+  command, port, pages) and, in a closed «Avanzado» section, the advanced settings below except those Despliegue
+  edits (PLA-133). A project with code made
   on the screen starts with a release step that ships from the screen (mode `merge`); `pnpm project:add` and
   `create_company_project` add none. No field takes a secret: a token is named by
   its variable (`github.token_env`, `vercel.token_env`), and a value shaped like a token is refused (`SECRET_VALUE`).
   Each missing item on the readiness list links to its section. Plomería's «Cada corrida» sets the company's
   `max_turns`, `timeout_minutes` and `cooldown_minutes`.
+- **Despliegue** (PLA-I68, once called Camino; the code and its address still say `camino`): how a project's code
+  reaches people, a door before Ajustes (`/ceo?proyecto=<slug>&t=camino`). Configuration only: shipping, migrating and
+  merging stay in Publicar. Its sections are Resumen, Conexiones y llaves, Propuestas (the project's open PRs),
+  Repositorio y ramas, Commits, Pruebas (CI), Entornos and Historial. It checks the repo against GitHub, the services and
+  this machine, and proposes changes (rulesets, workflows, commit checks) as PRs. PLA-133: it is where `start_branch`,
+  `release_target`, `release_on`, the GitHub key's variable and `vercel` are edited; they left Ajustes › Avanzado.
+- **Marca** (PLA-I66): the project's logo and its icon files, a door before Despliegue.
 
 #### Project settings
 
