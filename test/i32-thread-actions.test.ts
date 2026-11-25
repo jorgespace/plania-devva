@@ -151,7 +151,7 @@ test("I32-4 #1: aceptar on a PR merges it into sandbox with gh pr merge --merge 
 });
 
 // PLA-I68-3: Camino's rule for the branch (required checks) holds in Aceptar too, and a squash chosen there is used.
-test("I68-3: aceptar refuses while the branch's Camino rule names a check that is not green; squash once chosen in Camino", async () => {
+test("I68-3: aceptar refuses while the branch's Despliegue rule names a check that is not green; squash once chosen in Despliegue", async () => {
   const p = await store.projectId("micasa");
   const config = { rules: { sandbox: { on: true, pr: true, nodel: true, agents: false } }, required_checks: { sandbox: ["check"] }, merge: { squash: true } } as never;
   await store.fix(async (uow) => {

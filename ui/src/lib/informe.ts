@@ -69,7 +69,7 @@ export const INFORME_WORDS = defineWords({
       "note": "Nota al equipo",
       "idea.despertar": "Despertar",
     } as Record<string, string>,
-    area: { maquinas: "Máquinas", captures: "Fotos", camino: "Camino", settings: "Ajustes", logo: "Marca", marca: "Marca", team: "Equipo", seats: "Equipo" } as Record<string, string>,
+    area: { maquinas: "Máquinas", captures: "Fotos", camino: "Despliegue", settings: "Ajustes", logo: "Marca", marca: "Marca", team: "Equipo", seats: "Equipo" } as Record<string, string>,
     other: "Otros botones",
   },
   en: {
@@ -122,7 +122,7 @@ export const INFORME_WORDS = defineWords({
       "note": "Note to the team",
       "idea.despertar": "Wake up",
     } as Record<string, string>,
-    area: { maquinas: "Machines", captures: "Photos", camino: "Path", settings: "Settings", logo: "Brand", marca: "Brand", team: "Team", seats: "Team" } as Record<string, string>,
+    area: { maquinas: "Machines", captures: "Photos", camino: "Deploy", settings: "Settings", logo: "Brand", marca: "Brand", team: "Team", seats: "Team" } as Record<string, string>,
     other: "Other buttons",
   },
 });

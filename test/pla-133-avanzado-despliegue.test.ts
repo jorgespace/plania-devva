@@ -53,7 +53,7 @@ after(async () => {
 });
 
 describe("check 2: the five left «Avanzado» and the registry names their Despliegue control", () => {
-  test("no Avanzado field for them; each key's control is in Camino; every Avanzado key still has its field", () => {
+  test("no Avanzado field for them; each key's control is in Despliegue; every Avanzado key still has its field", () => {
     for (const f of FIVE) assert.ok(!(AVANZADO_FIELDS as readonly string[]).includes(f), `${f} is not in «Avanzado»`);
     assert.equal(SETTINGS.start_branch.control, "camino.codigo");
     for (const k of ["release_target", "release_on", "vercel"] as const) assert.equal(SETTINGS[k].control, "camino.entornos", k);

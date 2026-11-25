@@ -434,7 +434,7 @@ describe("Propuestas leave Archivo", () => {
     assert.deepEqual(g.map((x) => [x.base, x.items.map((i) => i.number)]), [["main", [2]], ["sandbox", [3, 1]], ["feat/x", [4]]]);
   });
 
-  test("a PR address opens in Camino; the door sits before Ajustes (PLA-135: Archivo is gone)", () => {
+  test("a PR address opens in Despliegue; the door sits before Ajustes (PLA-135: Archivo is gone)", () => {
     assert.equal((barra as Record<string, unknown>).archivoCount, undefined);
     assert.deepEqual([...corr.DOORS], ["equipo", "maquinas", "marca", "camino", "ajustes"]);
     assert.equal(corr.tabOfVer({ kind: "pr", n: 3 }), "camino");
