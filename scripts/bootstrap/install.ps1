@@ -1,5 +1,5 @@
 # PLA-I2-4 (audit B2): install Plania on Windows from one line, without corepack, on a brand-new machine.
-#   irm https://github.com/Jorg3L3on/plania/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/jorgespace/plania-devva/releases/latest/download/install.ps1 | iex
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -From plania-0.1.0.tar.gz   a package already here
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Dir D:\plania -InstallArgs '--prefix','plania_casa'
 # Parameters, each also read from the environment for the one-line form: -Dir (PLANIA_DIR, default ~\plania),
@@ -12,7 +12,7 @@
 # none), then `pnpm plania:install`, which starts Plania as a service.
 # Downloads come from PLANIA_DOWNLOAD_BASE (default: the latest GitHub Release). pnpm release:pack stamps the
 # release's version into $DefaultVersion; with no version the installer takes plania-latest.tar.gz, which every
-# release carries. Another version: PLANIA_DOWNLOAD_BASE=https://github.com/Jorg3L3on/plania/releases/download/v<x.y.z>.
+# release carries. Another version: PLANIA_DOWNLOAD_BASE=https://github.com/jorgespace/plania-devva/releases/download/v<x.y.z>.
 # This file stays ASCII: Windows PowerShell 5.1 reads a file without a BOM as ANSI, and a BOM breaks `irm | iex`.
 # Accented letters are written {a} {e} {i} {o} {u} {n} {?} and put back by Say.
 param(
@@ -26,7 +26,7 @@ param(
 )
 
 $DefaultVersion = ''
-$DefaultBase = 'https://github.com/Jorg3L3on/plania/releases/latest/download'
+$DefaultBase = 'https://github.com/jorgespace/plania-devva/releases/latest/download'
 
 # The error and progress preferences are set inside Install-Plania, not here: through `irm | iex` this file runs in
 # the user's own session, and a value set at this level would stay in their window after the install.

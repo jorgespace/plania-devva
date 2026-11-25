@@ -43,7 +43,7 @@ release/plania-<version>.tar.gz.sha256
 Each copy is stamped with the release's version. Where releases are downloaded from is a setting:
 `PLANIA_DOWNLOAD_BASE` (an `http(s)` address, the folder that holds those files). Set when packing, it becomes the
 installers' default address; set where an installer runs, it wins. Unset, the default is the latest GitHub Release,
-`https://github.com/Jorg3L3on/plania/releases/latest/download`.
+`https://github.com/jorgespace/plania-devva/releases/latest/download`.
 
 ## Publishing a release (GitHub Releases)
 
@@ -55,7 +55,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 `.github/workflows/release.yml` runs on a `v*` tag. It first runs the clean-machine install
 (`.github/workflows/install.yml`, below) on Linux; then it checks the tag names `package.json`'s
-version, packs with `PLANIA_DOWNLOAD_BASE=https://github.com/Jorg3L3on/plania/releases/download/v<version>` and
+version, packs with `PLANIA_DOWNLOAD_BASE=https://github.com/jorgespace/plania-devva/releases/download/v<version>` and
 uploads to the release:
 
 | Asset | What |
@@ -64,12 +64,12 @@ uploads to the release:
 | `plania-latest.tar.gz`, `.sha256` | The same bytes under the fixed name every release carries. |
 | `install.sh`, `install.ps1` | The installers, stamped with this version and this release's own address. |
 
-The one-liners in the README read `https://github.com/Jorg3L3on/plania/releases/latest/download/install.sh` (and
+The one-liners in the README read `https://github.com/jorgespace/plania-devva/releases/latest/download/install.sh` (and
 `install.ps1`), which GitHub serves from the newest release. That installer downloads its own release's
 `plania-<version>.tar.gz` from `releases/download/v<version>`, so an older release's installer keeps working after a
 newer one is published. An installer with no stamped version (run from a checkout) downloads `plania-latest.tar.gz`
 from `releases/latest/download`. For a given older version, run the installer with
-`PLANIA_DOWNLOAD_BASE=https://github.com/Jorg3L3on/plania/releases/download/v<version>` and `--version <version>`.
+`PLANIA_DOWNLOAD_BASE=https://github.com/jorgespace/plania-devva/releases/download/v<version>` and `--version <version>`.
 
 ## What an installer does
 
