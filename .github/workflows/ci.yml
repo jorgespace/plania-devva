@@ -1,16 +1,16 @@
 name: CI
 
-# PLA-I2-15 on the plania-devva branch. Plania keeps its data in a devva engine that runs in Docker (deploy/devva/),
+# PLA-I2-15 in the devva fork. Plania keeps its data in a devva engine that runs in Docker (deploy/devva/),
 # and GitHub's hosted runners have Docker on Linux only, so:
 #   - the build (both type-checks, then the screen) runs on macOS and Linux on every change;
 #   - the tests and the canary run on Linux, against an engine this workflow starts.
 # The engine's image is not public. The repository variable DEVVA_IMAGE names one the runner can pull; on ghcr.io the
 # workflow's own token signs in. Without it the test jobs warn that they did not run and stop there; the build still
-# runs. Pull requests, and pushes to main and to plania-devva.
+# runs. Pull requests, and pushes to main.
 on:
   pull_request:
   push:
-    branches: [main, plania-devva]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}

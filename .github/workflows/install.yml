@@ -1,6 +1,6 @@
 name: Install from zero
 
-# PLA-I2-4 (from zero) on the plania-devva branch: the release package installed by the real one-line installer, the
+# PLA-I2-4 (from zero) in the devva fork: the release package installed by the real one-line installer, the
 # way a person with a new computer runs it: --from the packed archive, --yes (no questions), --no-open. Plania keeps its
 # data in a devva engine that runs in Docker, and the installer starts it from the package's compose file. GitHub's
 # hosted runners run Linux containers on Linux only (macOS runners have no Docker; Windows runners run Windows
