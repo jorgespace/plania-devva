@@ -47,16 +47,23 @@ installers' default address; set where an installer runs, it wins. Unset, the de
 
 ## Publishing a release (GitHub Releases)
 
-Releases live on this repository's GitHub Releases. Bump `version` and `CHANGELOG.md`, merge, then push the tag:
+Releases live on this repository's GitHub Releases. There is no GitHub Actions workflow: tests, the clean-machine
+install and the release are run by hand on the owner's machine, so nothing runs on GitHub's runners. Bump `version`
+and `CHANGELOG.md`, merge, run `pnpm build` and `pnpm test` on `main`, try the install (below), then from `main`, with
+`gh` signed in:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+v="$(node -p 'require("./package.json").version')"
+git tag "v$v" && git push origin "v$v"
+PLANIA_DOWNLOAD_BASE="https://github.com/jorgespace/plania-devva/releases/download/v$v" pnpm release:pack
+cd release
+cp "plania-$v.tar.gz" plania-latest.tar.gz && cp "plania-$v.tar.gz.sha256" plania-latest.tar.gz.sha256
+gh release create "v$v" --verify-tag --title "Plania $v" --generate-notes \
+  "plania-$v.tar.gz" "plania-$v.tar.gz.sha256" plania-latest.tar.gz plania-latest.tar.gz.sha256 install.sh install.ps1
 ```
 
-`.github/workflows/release.yml` runs on a `v*` tag. It first runs the clean-machine install
-(`.github/workflows/install.yml`, below) on Linux; then it checks the tag names `package.json`'s
-version, packs with `PLANIA_DOWNLOAD_BASE=https://github.com/jorgespace/plania-devva/releases/download/v<version>` and
-uploads to the release:
+On Windows, run it from Git Bash. The pack stamps the installers with `PLANIA_DOWNLOAD_BASE`, this release's own
+address, and the release carries:
 
 | Asset | What |
 |---|---|
@@ -115,22 +122,14 @@ parses both (`bash -n`, the PowerShell parser), checks the pack, and installs a 
 against a stand-in pnpm, with `PLANIA_BOOTSTRAP_SKIP_DEPS=1` so nothing is installed or started on the machine running
 the tests (no Docker check, no engine).
 
-## The clean-machine install in CI
+## The clean-machine install, by hand
 
-`.github/workflows/install.yml` packs the release on Linux, then on an `ubuntu-latest` runner pulls the devva engine's
-image, runs the real installer (`--from <package> --yes --no-open`), which starts the engine with Docker from the
-package's compose file, checks that `http://localhost:3737/health/ui` answers, `/primer-arranque` serves the screen and
-`.env` names the store's prefix, and runs `pnpm uninstall:plania --delete-data`. It runs on pushes to `jl/**`, on pull
-requests that touch the installers, by hand, and before every release. Claude Code is not on the runner; the install
-goes on without it, as it does for a person. The job sets `PLANIA_UNSUPPORTED_SKIP_CHECK=memory`: a comma-separated
-list of machine-check items the install lets pass when they are missing. It exists for that job and is read only on a
-GitHub Actions runner (`GITHUB_ACTIONS=true`), so it does nothing on a user's machine.
-
-Only Linux runs it: GitHub's macOS runners have no Docker and its Windows runners run Windows containers only, so the
-install on macOS and on Windows is tried by hand before a release (below). The engine's image is not public: set the
-repository variable `DEVVA_IMAGE` to an image the runner can pull (on `ghcr.io`, the workflow's own token signs in).
-Without it the job, and the test and canary jobs in `.github/workflows/ci.yml`, warn that they did not run; the
-build in `ci.yml` (both type-checks and the screen, on Linux and macOS) runs either way.
+There is no CI for it. Before every release, on a machine with Docker and the devva engine's image, pack and run the
+real installer into a throwaway folder (`--from <package> --yes --no-open`). It starts the engine from the package's
+compose file; check that `http://localhost:3737/health/ui` answers, `/primer-arranque` serves the screen and `.env`
+names the store's prefix, then run `pnpm uninstall:plania --delete-data` in that folder. Never point it at this
+machine's real install or store. (`PLANIA_UNSUPPORTED_SKIP_CHECK` is read only on a GitHub Actions runner,
+`GITHUB_ACTIONS=true`, and so does nothing here.)
 
 To try a release before it is published:
 
