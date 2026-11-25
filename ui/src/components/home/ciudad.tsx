@@ -175,7 +175,8 @@ function LegendButton({ id }: { id: string }) {
 }
 
 // Inicio's city: no headline over it (Hoy, under it, says what waits); the sky holds only the pile of loose
-// decisions and the «i» for the legend, in its top right corner.
+// decisions and the «i» for the legend, in its top right corner. It follows the app's theme (data-day): night in
+// dark, day in light.
 export function Ciudad({ districts, loose, envLines }: {
   districts: District[];
   loose: InboxItem[];
@@ -188,7 +189,8 @@ export function Ciudad({ districts, loose, envLines }: {
     <div className="grid gap-3">
       <section
         aria-label={w.cityLabel}
-        className="city dark relative overflow-hidden rounded-[22px] border border-white/[0.07] text-foreground md:rounded-[26px]"
+        data-day
+        className="city relative overflow-hidden rounded-[22px] border border-foreground/[0.08] text-foreground md:rounded-[26px]"
       >
         {STARS.map(([x, y, d], i) => <span key={i} aria-hidden className="city-star" style={{ left: `${x}%`, top: `${y}%`, animationDelay: `${d}s` }} />)}
 
@@ -206,7 +208,7 @@ export function Ciudad({ districts, loose, envLines }: {
 
         <div className="relative -mt-8 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <div className="relative flex w-max min-w-full items-end justify-between gap-4 px-3 pt-24 md:gap-8 md:px-8 md:pt-28">
-            <div aria-hidden className="absolute inset-x-0 bottom-0 border-t border-white/10" style={{ height: "var(--street-h)", background: "var(--street)" }} />
+            <div aria-hidden className="absolute inset-x-0 bottom-0 border-t border-foreground/10" style={{ height: "var(--street-h)", background: "var(--street)" }} />
             {districts.length === 0 ? (
               <p className="relative z-[1] w-full pb-32 text-center font-voice text-2xl text-foreground/70 italic">{w.asleep}</p>
             ) : (
@@ -220,7 +222,7 @@ export function Ciudad({ districts, loose, envLines }: {
         </div>
 
         {/* On a phone the skyline scrolls sideways: a fade on the right says there is more city. */}
-        {!wide && <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 z-[2] w-10 bg-gradient-to-l from-[#0f1220] to-transparent" />}
+        {!wide && <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 z-[2] w-10 bg-gradient-to-l from-[var(--night-2)] to-transparent" />}
       </section>
     </div>
   );

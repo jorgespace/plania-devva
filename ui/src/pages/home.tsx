@@ -1,5 +1,6 @@
 // Inicio: la ciudad of open initiatives at the top, the color legend behind an «i» in its sky and whatever waits
-// on the owner decided from a tower's ficha; under it, what changed, what the machine runs and the projects as a rail. The data
+// on the owner decided from a tower's ficha; under it, what changed, the projects as a rail and, last, what the machine
+// runs. The data
 // comes from the same three queries the other screens use.
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -60,10 +61,8 @@ export function HomePage() {
     return (
       <div className="grid gap-6">
         <Skeleton className="h-[560px] rounded-[26px]" />
-        <div className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
-          <Skeleton className="h-72 rounded-[22px]" />
-          <Skeleton className="h-72 rounded-[22px]" />
-        </div>
+        <Skeleton className="h-72 rounded-[22px]" />
+        <Skeleton className="h-72 rounded-[22px]" />
       </div>
     );
   }
@@ -78,12 +77,11 @@ export function HomePage() {
 
       <Proximo lines={model.proximo} names={names} nowMs={nowMs} />
 
-      {/* Under the city, as before: La máquina beside the projects; they stack below xl. */}
-      <div className="grid items-start gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
-        <div className="min-w-0 animate-rise" style={{ animationDelay: "280ms" }}>
-          {machine.data ? <LaMac machine={machine.data} servers={model.servers} names={names} nowMs={nowMs} /> : <Skeleton className="h-72 rounded-[22px]" />}
-        </div>
-        <Proyectos tiles={model.tiles} />
+      <Proyectos tiles={model.tiles} />
+
+      {/* La máquina closes the page, under the projects. */}
+      <div className="min-w-0 animate-rise" style={{ animationDelay: "280ms" }}>
+        {machine.data ? <LaMac machine={machine.data} servers={model.servers} names={names} nowMs={nowMs} /> : <Skeleton className="h-72 rounded-[22px]" />}
       </div>
     </div>
   );

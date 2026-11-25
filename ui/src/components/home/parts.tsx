@@ -77,7 +77,6 @@ export function LaMac({ machine, servers, names, nowMs }: { machine: Machine; se
 
 function TileCard({ t, index }: { t: Tile; index: number }) {
   const w = words(HOME_PARTS);
-  const [a] = projectAccent(t.slug);
   const pct = t.progress.total === 0 ? 0 : (t.progress.closed / t.progress.total) * 100;
   const allDone = t.left.initiatives === 0 && t.left.tickets === 0;
   // What needs a look, most urgent first; nothing here means nothing waits.
@@ -91,7 +90,6 @@ function TileCard({ t, index }: { t: Tile; index: number }) {
       <Link
         to={`/p/${t.slug}`}
         className="lift grid h-full content-start gap-3 rounded-[18px] border bg-card px-4 py-4 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-        style={{ borderTop: `3px solid ${a}` }}
       >
         <span className="flex items-baseline justify-between gap-2">
           <span className="flex items-center gap-2 font-display text-[22px] leading-none font-extrabold tracking-tight">
