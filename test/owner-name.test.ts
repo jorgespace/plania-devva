@@ -106,7 +106,8 @@ describe("check 1: a fresh install with another name", () => {
     const files = [...walk(path.join(ROOT, "ui/src"), /\.(ts|tsx)$/), ...walk(path.join(ROOT, "src"), /\.ts$/).filter((f) => !f.endsWith(`${path.sep}owner.ts`))];
     const hits = files.flatMap((f) => codeLines(f).filter((l) => /\bJorge\b/.test(l)).map((l) => `${path.relative(ROOT, f)}: ${l.trim().slice(0, 120)}`));
     assert.deepEqual(hits, []);
-    assert.match(readFileSync(path.join(ROOT, "src/mcp/progress.ts"), "utf8"), /"Needs owner": "Te toca"/);
+    // PLA-I1-2: Progreso's status words left with the page; the decisions module still says «Te toca».
+    assert.match(readFileSync(path.join(ROOT, "src/api/company-decisions.ts"), "utf8"), /lo aplazó desde Te toca\./);
   });
 
   test("the display name is stored once, read at start, and the brief falls back to it", async () => {
