@@ -9,7 +9,6 @@ import { accentInk, projectAccent } from "@/components/plan/visuals";
 import { towerLabel, type District, type Tower, type WindowTone } from "@/lib/city";
 import type { Headline } from "@/lib/home";
 import type { InboxItem } from "@/lib/types";
-import { Titular } from "./parts";
 import { words } from "@/lib/i18n";
 import { HOME_CITY } from "@/lib/home-pieces-words";
 
@@ -138,12 +137,50 @@ function Legend() {
   );
 }
 
-export function Ciudad({ districts, loose, headline, envLines, nowMs }: {
+/** The «i» in a city's top right corner; it opens what each window color and mark means. Escape closes it. */
+function LegendButton({ id }: { id: string }) {
+  const w = words(HOME_CITY);
+  const [open, setOpen] = useState(false);
+  const iRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      setOpen(false);
+      iRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open]);
+  return (
+    <div className="relative flex-none">
+      <button
+        ref={iRef}
+        type="button"
+        className="city-i"
+        aria-expanded={open}
+        aria-controls={id}
+        aria-label={w.legendButton}
+        onClick={() => setOpen((x) => !x)}
+        data-control="city-legend"
+      >
+        i
+      </button>
+      <div id={id} className="city-legend" hidden={!open}>
+        <Legend />
+      </div>
+    </div>
+  );
+}
+
+// Inicio's city: no headline over it (Hoy, under it, says what waits); the sky holds only the pile of loose
+// decisions and the «i» for the legend, in its top right corner. It follows the app's theme (data-day): night in
+// dark, day in light.
+export function Ciudad({ districts, loose, envLines }: {
   districts: District[];
   loose: InboxItem[];
-  headline: Headline;
   envLines: Record<string, string>;
-  nowMs: number;
 }) {
   const w = words(HOME_CITY);
   const wide = useWide();
@@ -152,28 +189,26 @@ export function Ciudad({ districts, loose, headline, envLines, nowMs }: {
     <div className="grid gap-3">
       <section
         aria-label={w.cityLabel}
-        className="city dark relative overflow-hidden rounded-[22px] border border-white/[0.07] text-foreground md:rounded-[26px]"
+        data-day
+        className="city relative overflow-hidden rounded-[22px] border border-foreground/[0.08] text-foreground md:rounded-[26px]"
       >
         {STARS.map(([x, y, d], i) => <span key={i} aria-hidden className="city-star" style={{ left: `${x}%`, top: `${y}%`, animationDelay: `${d}s` }} />)}
 
-        <div className="pointer-events-none relative z-[3] flex flex-wrap items-start justify-between gap-x-8 gap-y-3 px-5 pt-6 md:px-10 md:pt-8">
-          <Titular headline={headline} nowMs={nowMs} />
-          <div className="pointer-events-auto grid justify-items-start gap-2.5 md:justify-items-end md:pt-1">
-            <Legend />
-            {loose.length > 0 && (
-              <Link
-                to="/inbox"
-                className="inline-flex min-h-8 items-center gap-2 rounded-full border border-status-owner/45 bg-status-owner/12 px-3 text-xs font-semibold text-ink-owner transition hover:bg-status-owner/20 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-              >
-                {w.loose(loose.length)}
-              </Link>
-            )}
-          </div>
+        <div className="relative z-[3] flex items-center justify-end gap-3 px-5 pt-5 md:px-8 md:pt-6">
+          {loose.length > 0 && (
+            <Link
+              to="/inbox"
+              className="inline-flex min-h-8 items-center gap-2 rounded-full border border-status-owner/45 bg-status-owner/12 px-3 text-xs font-semibold text-ink-owner transition hover:bg-status-owner/20 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              {w.loose(loose.length)}
+            </Link>
+          )}
+          <LegendButton id="home-city-legend" />
         </div>
 
-        <div className="relative -mt-24 overflow-x-auto overscroll-x-contain [scrollbar-width:none] md:-mt-36 [&::-webkit-scrollbar]:hidden">
-          <div className="relative flex w-max min-w-full items-end justify-between gap-4 px-3 pt-36 md:gap-8 md:px-8 md:pt-52">
-            <div aria-hidden className="absolute inset-x-0 bottom-0 border-t border-white/10" style={{ height: "var(--street-h)", background: "var(--street)" }} />
+        <div className="relative -mt-8 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="relative flex w-max min-w-full items-end justify-between gap-4 px-3 pt-24 md:gap-8 md:px-8 md:pt-28">
+            <div aria-hidden className="absolute inset-x-0 bottom-0 border-t border-foreground/10" style={{ height: "var(--street-h)", background: "var(--street)" }} />
             {districts.length === 0 ? (
               <p className="relative z-[1] w-full pb-32 text-center font-voice text-2xl text-foreground/70 italic">{w.asleep}</p>
             ) : (
@@ -187,7 +222,7 @@ export function Ciudad({ districts, loose, headline, envLines, nowMs }: {
         </div>
 
         {/* On a phone the skyline scrolls sideways: a fade on the right says there is more city. */}
-        {!wide && <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 z-[2] w-10 bg-gradient-to-l from-[#0f1220] to-transparent" />}
+        {!wide && <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 z-[2] w-10 bg-gradient-to-l from-[var(--night-2)] to-transparent" />}
       </section>
     </div>
   );
@@ -207,19 +242,6 @@ export function CiudadOficina({ districts, pre, headline, links, plateFor, under
 }) {
   const w = words(HOME_CITY);
   const wide = useWide();
-  const [legend, setLegend] = useState(false);
-  const iRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!legend) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      setLegend(false);
-      iRef.current?.focus();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [legend]);
   let offset = 0;
   return (
     <div className="city-of" data-city-oficina={districts.length}>
@@ -237,23 +259,7 @@ export function CiudadOficina({ districts, pre, headline, links, plateFor, under
             </p>
             {links && <div className="mt-1 flex flex-wrap items-center gap-x-5 gap-y-1.5" data-city-links>{links}</div>}
           </div>
-          <div className="relative flex-none">
-            <button
-              ref={iRef}
-              type="button"
-              className="city-i"
-              aria-expanded={legend}
-              aria-controls="city-legend"
-              aria-label={w.legendButton}
-              onClick={() => setLegend((x) => !x)}
-              data-control="city-legend"
-            >
-              i
-            </button>
-            <div id="city-legend" className="city-legend" hidden={!legend}>
-              <Legend />
-            </div>
-          </div>
+          <LegendButton id="city-legend" />
         </header>
 
         <div className="relative min-h-0 flex-1 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">

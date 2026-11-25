@@ -122,10 +122,6 @@ function GoalsBlock({
   );
 }
 
-export function GoalsHome() {
-  return <GoalsBlock compact companyOnly heading="section" />;
-}
-
 export function GoalsProject({ slug }: { slug: string }) {
   return <GoalsBlock project={slug} heading="section" />;
 }

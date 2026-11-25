@@ -1,39 +1,19 @@
-// Inicio's pieces around the city: the headline with its voice line, what the machine runs, and the
-// projects as a compact rail.
+// Inicio's pieces around the city: what the machine runs, what is due next, and the projects as a compact rail.
 import { ArrowRightIcon, CalendarIcon, CheckIcon, CpuIcon, MessageCircleQuestionIcon, PauseIcon, RocketIcon, TriangleAlertIcon } from "lucide-react";
 import { Link } from "react-router";
 import { ProjectMark } from "@/components/plania-mark";
 import { Glyph, Kicker, accentInk, projectAccent, rise, TONE_TEXT, toneVar } from "@/components/plan/visuals";
 import { dayText, type DateLine } from "@/lib/due";
-import type { Headline, LiveServer, Tile } from "@/lib/home";
+import type { LiveServer, Tile } from "@/lib/home";
 import type { StationTone } from "@/lib/lanes";
 import { ago } from "@/lib/time";
 import type { Machine } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { LOCALE } from "@/lib/locale";
 import { words } from "@/lib/i18n";
 import { HOME_PARTS } from "@/lib/home-pieces-words";
 
-const DATE = new Intl.DateTimeFormat(LOCALE, { weekday: "long", day: "numeric", month: "long" });
-const TIME = new Intl.DateTimeFormat(LOCALE, { hour: "2-digit", minute: "2-digit" });
-
 function tint(tone: StationTone, pct = 12) {
   return { background: `color-mix(in oklab, ${toneVar(tone)} ${pct}%, transparent)` };
-}
-
-export function Titular({ headline, nowMs }: { headline: Headline; nowMs: number }) {
-  const when = `${DATE.format(nowMs)} · ${TIME.format(nowMs)}`;
-  return (
-    <div className="grid max-w-[860px] animate-rise gap-3">
-      <p className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground uppercase first-letter:uppercase">{when}</p>
-      <h1 className="font-display text-4xl leading-[0.98] font-extrabold tracking-[-0.03em] sm:text-5xl lg:text-[56px]">{headline.title}</h1>
-      <p className="font-voice text-2xl leading-[1.15] text-foreground/75 italic sm:text-[28px]">
-        {headline.voice.map((part, i) => (
-          <span key={i} className={cn(part.tone === "owner" && "text-ink-owner")}>{part.text}</span>
-        ))}
-      </p>
-    </div>
-  );
 }
 
 function fmtKb(kb: number) {
@@ -97,7 +77,6 @@ export function LaMac({ machine, servers, names, nowMs }: { machine: Machine; se
 
 function TileCard({ t, index }: { t: Tile; index: number }) {
   const w = words(HOME_PARTS);
-  const [a] = projectAccent(t.slug);
   const pct = t.progress.total === 0 ? 0 : (t.progress.closed / t.progress.total) * 100;
   const allDone = t.left.initiatives === 0 && t.left.tickets === 0;
   // What needs a look, most urgent first; nothing here means nothing waits.
@@ -111,7 +90,6 @@ function TileCard({ t, index }: { t: Tile; index: number }) {
       <Link
         to={`/p/${t.slug}`}
         className="lift grid h-full content-start gap-3 rounded-[18px] border bg-card px-4 py-4 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-        style={{ borderTop: `3px solid ${a}` }}
       >
         <span className="flex items-baseline justify-between gap-2">
           <span className="flex items-center gap-2 font-display text-[22px] leading-none font-extrabold tracking-tight">

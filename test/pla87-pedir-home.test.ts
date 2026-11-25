@@ -36,13 +36,12 @@ after(async () => {
   await store?.end();
 });
 
-test("PLA-87 #1: Inicio's Pedir uses the ask route, its modes and ASK_MAX, never the 200-character ticket route", async () => {
-  const src = await readFile(new URL("../ui/src/components/pedir.tsx", import.meta.url), "utf8");
-  assert.match(src, /api\.askProject\(/);
-  assert.doesNotMatch(src, /createTask\(/);
-  assert.match(src, /maxLength=\{ASK_MAX\}/);
-  assert.doesNotMatch(src, /maxLength=\{200\}/);
-  assert.match(src, /MODES\.map/);
+test("PLA-87 #1: Inicio opens on the city; its Pedir field and the first-delivery guide are gone (asking lives in La corriente)", async () => {
+  const src = await readFile(new URL("../ui/src/pages/home.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /PedirHome|GuiaPrimeraEntrega/);
+  const city = src.indexOf("<Ciudad ");
+  const hoy = src.indexOf("<Hoy ");
+  assert.ok(city > 0 && hoy > city, "the city comes first, what changed and waits after it");
 });
 
 test("PLA-87 #2: a 501-character request sent as Darle forma arrives whole, as an idea", async () => {
